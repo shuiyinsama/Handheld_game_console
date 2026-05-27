@@ -7,6 +7,7 @@
 #include "driver/sdspi_host.h"
 #include "driver/spi_common.h"
 #include "esp_check.h"
+#include "esp_heap_caps.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 
@@ -44,6 +45,45 @@ static bool ends_with_ignore_case(const char *name, const char *suffix)
 static bool is_rom_file(const char *name)
 {
     return ends_with_ignore_case(name, ".gb") || ends_with_ignore_case(name, ".gbc");
+}
+
+static esp_err_t make_rom_path(const char *name, char *path, size_t path_size)
+{
+    if (name == NULL || path == NULL || path_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const int written = snprintf(path, path_size, "%s/%s", STORAGE_MOUNT_POINT, name);
+    if (written < 0 || (size_t)written >= path_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    return ESP_OK;
+}
+
+static void parse_rom_header(const uint8_t *header, storage_rom_info_t *info)
+{
+    memset(info, 0, sizeof(*info));
+    for (size_t i = 0; i < STORAGE_ROM_TITLE_MAX - 1; i++) {
+        const uint8_t ch = header[0x134 + i];
+        if (ch == 0 || ch < 32 || ch > 126) {
+            break;
+        }
+        info->title[i] = (char)ch;
+    }
+    if (info->title[0] == '\0') {
+        strlcpy(info->title, "UNKNOWN", sizeof(info->title));
+    }
+
+    info->cartridge_type = header[0x147];
+    info->rom_size_code = header[0x148];
+    info->ram_size_code = header[0x149];
+    info->cgb_flag = header[0x143];
+
+    uint8_t checksum = 0;
+    for (size_t addr = 0x134; addr <= 0x14C; addr++) {
+        checksum = (uint8_t)(checksum - header[addr] - 1);
+    }
+    info->header_checksum_ok = checksum == header[0x14D];
 }
 
 esp_err_t storage_mount(void)
@@ -165,7 +205,7 @@ esp_err_t storage_read_rom_info(const char *name, storage_rom_info_t *info)
     ESP_RETURN_ON_ERROR(storage_mount(), TAG, "SD mount failed");
 
     char path[sizeof(STORAGE_MOUNT_POINT) + STORAGE_ROM_NAME_MAX + 2] = {0};
-    snprintf(path, sizeof(path), "%s/%s", STORAGE_MOUNT_POINT, name);
+    ESP_RETURN_ON_ERROR(make_rom_path(name, path, sizeof(path)), TAG, "ROM path build failed");
 
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
@@ -180,28 +220,71 @@ esp_err_t storage_read_rom_info(const char *name, storage_rom_info_t *info)
         return ESP_ERR_INVALID_SIZE;
     }
 
-    memset(info, 0, sizeof(*info));
-    for (size_t i = 0; i < STORAGE_ROM_TITLE_MAX - 1; i++) {
-        const uint8_t ch = header[0x134 + i];
-        if (ch == 0 || ch < 32 || ch > 126) {
-            break;
-        }
-        info->title[i] = (char)ch;
-    }
-    if (info->title[0] == '\0') {
-        strlcpy(info->title, "UNKNOWN", sizeof(info->title));
-    }
-
-    info->cartridge_type = header[0x147];
-    info->rom_size_code = header[0x148];
-    info->ram_size_code = header[0x149];
-    info->cgb_flag = header[0x143];
-
-    uint8_t checksum = 0;
-    for (size_t addr = 0x134; addr <= 0x14C; addr++) {
-        checksum = (uint8_t)(checksum - header[addr] - 1);
-    }
-    info->header_checksum_ok = checksum == header[0x14D];
+    parse_rom_header(header, info);
 
     return ESP_OK;
+}
+
+esp_err_t storage_load_rom(const char *name, storage_loaded_rom_t *rom)
+{
+    if (name == NULL || rom == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    storage_free_rom(rom);
+    ESP_RETURN_ON_ERROR(storage_mount(), TAG, "SD mount failed");
+
+    char path[sizeof(STORAGE_MOUNT_POINT) + STORAGE_ROM_NAME_MAX + 2] = {0};
+    ESP_RETURN_ON_ERROR(make_rom_path(name, path, sizeof(path)), TAG, "ROM path build failed");
+
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        return ESP_FAIL;
+    }
+
+    if (fseek(file, 0, SEEK_END) != 0) {
+        fclose(file);
+        return ESP_FAIL;
+    }
+
+    const long file_size = ftell(file);
+    if (file_size < 0x150) {
+        fclose(file);
+        return ESP_ERR_INVALID_SIZE;
+    }
+    rewind(file);
+
+    uint8_t *data = heap_caps_malloc((size_t)file_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (data == NULL) {
+        data = heap_caps_malloc((size_t)file_size, MALLOC_CAP_8BIT);
+    }
+    if (data == NULL) {
+        fclose(file);
+        return ESP_ERR_NO_MEM;
+    }
+
+    const size_t read_len = fread(data, 1, (size_t)file_size, file);
+    fclose(file);
+
+    if (read_len != (size_t)file_size) {
+        heap_caps_free(data);
+        return ESP_FAIL;
+    }
+
+    rom->data = data;
+    rom->size = (size_t)file_size;
+    parse_rom_header(rom->data, &rom->info);
+    return ESP_OK;
+}
+
+void storage_free_rom(storage_loaded_rom_t *rom)
+{
+    if (rom == NULL) {
+        return;
+    }
+
+    if (rom->data != NULL) {
+        heap_caps_free(rom->data);
+    }
+    memset(rom, 0, sizeof(*rom));
 }

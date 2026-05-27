@@ -9,13 +9,16 @@ The on-board TF slot is wired as SPI2:
 
 Format the TF card as FAT32, then copy `.gb` or `.gbc` files to the card root.
 After flashing, open `ROM BROWSER` from the main menu. Select a ROM and press
-`BOOT` to read its Game Boy header before the emulator core is connected.
+`BOOT` to read its Game Boy header. Press `BOOT` again on the ROM info page to
+load the whole ROM into PSRAM and enter the `GB PLAYER` screen.
 
 - `KEY3`: move up
 - `KEY1`: move down
 - `KEY0`: refresh SD / ROM list
 - `KEY2`: back to menu
-- `BOOT`: open selected ROM / return from ROM info
+- `BOOT`: open selected ROM / load from ROM info / return from GB PLAYER
+- In `GB PLAYER`: `KEY1` steps one CPU instruction, `KEY0` runs a short CPU slice,
+  `KEY2` resets CPU state.
 
 # Handheld Game Console
 

@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "gb_player.h"
 #include "storage.h"
 #include <stdio.h>
 
@@ -50,6 +51,7 @@ typedef enum {
     SCREEN_MENU = 0,
     SCREEN_ROM_BROWSER,
     SCREEN_ROM_INFO,
+    SCREEN_GB_PLAYER,
     SCREEN_COLLECT,
     SCREEN_INPUT_TEST,
     SCREEN_ABOUT,
@@ -63,6 +65,8 @@ typedef struct {
     esp_err_t rom_status;
     storage_rom_info_t rom_info;
     esp_err_t rom_info_status;
+    gb_player_t gb_player;
+    esp_err_t gb_load_status;
     char rom_names[ROM_LIST_MAX][STORAGE_ROM_NAME_MAX];
     game_state_t collect;
 } app_state_t;
@@ -384,6 +388,47 @@ static const char *cgb_mode_name(uint8_t flag)
     return "DMG";
 }
 
+static const char *gb_core_status_name(gb_core_status_t status)
+{
+    switch (status) {
+    case GB_CORE_READY: return "READY";
+    case GB_CORE_RUNNING: return "RUNNING";
+    case GB_CORE_HALTED: return "HALTED";
+    case GB_CORE_STOPPED: return "STOPPED";
+    case GB_CORE_UNSUPPORTED_OPCODE: return "BAD OP";
+    default: return "UNKNOWN";
+    }
+}
+
+static void draw_gb_logo_preview(const uint8_t *rom)
+{
+    const int scale = 4;
+    const int x0 = 92;
+    const int y0 = 142;
+    const uint16_t bg = board_rgb565(210, 222, 176);
+    const uint16_t fg = board_rgb565(42, 52, 36);
+
+    board_fill_rect(x0 - 12, y0 - 12, 216, 56, board_rgb565(112, 128, 92));
+    board_fill_rect(x0 - 8, y0 - 8, 208, 48, bg);
+
+    if (rom == NULL) {
+        return;
+    }
+
+    for (int byte_index = 0; byte_index < 48; byte_index++) {
+        const uint8_t value = rom[0x104 + byte_index];
+        const int row = byte_index / 6;
+        const int col_byte = byte_index % 6;
+        for (int bit = 0; bit < 8; bit++) {
+            if ((value & (0x80 >> bit)) != 0) {
+                const int x = x0 + (col_byte * 8 + bit) * scale;
+                const int y = y0 + row * scale;
+                board_fill_rect(x, y, scale, scale, fg);
+            }
+        }
+    }
+}
+
 static void draw_rom_browser(const app_state_t *app)
 {
     board_fill_screen(board_rgb565(18, 23, 30));
@@ -456,7 +501,58 @@ static void draw_rom_info(const app_state_t *app)
             3);
     }
 
-    draw_text(560, 406, "BOOT BACK", board_rgb565(110, 124, 136), 2);
+    draw_text(536, 380, "BOOT LOAD", board_rgb565(110, 124, 136), 2);
+    draw_text(536, 406, "KEY2 BACK", board_rgb565(110, 124, 136), 2);
+}
+
+static void load_selected_rom(app_state_t *app)
+{
+    if (app->rom_count == 0 || app->rom_selected >= app->rom_count) {
+        return;
+    }
+    app->gb_load_status = gb_player_load(&app->gb_player, app->rom_names[app->rom_selected]);
+    app->screen = SCREEN_GB_PLAYER;
+}
+
+static void draw_gb_player(const app_state_t *app)
+{
+    char line[48] = {0};
+
+    board_fill_screen(board_rgb565(20, 24, 28));
+    draw_text(54, 42, "GB PLAYER", board_rgb565(235, 220, 92), 4);
+
+    if (app->gb_load_status != ESP_OK || !gb_player_has_rom(&app->gb_player)) {
+        draw_text(58, 136, "ROM LOAD FAIL", board_rgb565(236, 92, 92), 3);
+        snprintf(line, sizeof(line), "ERR 0x%X", (unsigned int)app->gb_load_status);
+        draw_text(58, 190, line, board_rgb565(160, 178, 190), 3);
+    } else {
+        const storage_loaded_rom_t *rom = &app->gb_player.rom;
+        const gb_core_t *core = gb_player_core(&app->gb_player);
+        draw_text(58, 96, rom->info.title, board_rgb565(255, 255, 255), 3);
+        draw_gb_logo_preview(rom->data);
+
+        snprintf(line, sizeof(line), "LOADED %u KB", (unsigned int)(rom->size / 1024));
+        draw_text(58, 224, line, board_rgb565(80, 220, 120), 2);
+
+        if (core != NULL) {
+            snprintf(line, sizeof(line), "PC %04X OP %02X", core->pc, core->last_opcode);
+            draw_text(58, 260, line, board_rgb565(235, 220, 92), 2);
+
+            snprintf(line, sizeof(line), "AF %04X BC %04X", gb_core_af(core), gb_core_bc(core));
+            draw_text(58, 292, line, board_rgb565(160, 178, 190), 2);
+
+            snprintf(line, sizeof(line), "DE %04X HL %04X", gb_core_de(core), gb_core_hl(core));
+            draw_text(58, 324, line, board_rgb565(160, 178, 190), 2);
+
+            snprintf(line, sizeof(line), "%s %u", gb_core_status_name(core->status), (unsigned int)core->steps);
+            draw_text(58, 356, line, core->status == GB_CORE_UNSUPPORTED_OPCODE ? board_rgb565(236, 92, 92) : board_rgb565(130, 190, 230), 2);
+        }
+    }
+
+    draw_text(520, 328, "KEY0 RUN", board_rgb565(110, 124, 136), 2);
+    draw_text(520, 354, "KEY1 STEP", board_rgb565(110, 124, 136), 2);
+    draw_text(520, 380, "KEY2 RESET", board_rgb565(110, 124, 136), 2);
+    draw_text(520, 406, "BOOT BACK", board_rgb565(110, 124, 136), 2);
 }
 
 static bool update_player(const board_input_t *input, player_t *player)
@@ -607,9 +703,31 @@ void game_run(void)
         }
 
         if (app.screen == SCREEN_ROM_INFO) {
-            if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
+            if (input.changed[BOARD_BUTTON_KEY2] && input.pressed[BOARD_BUTTON_KEY2]) {
                 app.screen = SCREEN_ROM_BROWSER;
                 draw_rom_browser(&app);
+            } else if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
+                load_selected_rom(&app);
+                draw_gb_player(&app);
+            }
+            vTaskDelay(pdMS_TO_TICKS(33));
+            continue;
+        }
+
+        if (app.screen == SCREEN_GB_PLAYER) {
+            if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
+                gb_player_unload(&app.gb_player);
+                app.screen = SCREEN_ROM_INFO;
+                draw_rom_info(&app);
+            } else if (input.changed[BOARD_BUTTON_KEY0] && input.pressed[BOARD_BUTTON_KEY0]) {
+                gb_player_run_steps(&app.gb_player, 512);
+                draw_gb_player(&app);
+            } else if (input.changed[BOARD_BUTTON_KEY1] && input.pressed[BOARD_BUTTON_KEY1]) {
+                gb_player_step(&app.gb_player);
+                draw_gb_player(&app);
+            } else if (input.changed[BOARD_BUTTON_KEY2] && input.pressed[BOARD_BUTTON_KEY2]) {
+                app.gb_load_status = gb_player_reset_core(&app.gb_player);
+                draw_gb_player(&app);
             }
             vTaskDelay(pdMS_TO_TICKS(33));
             continue;
