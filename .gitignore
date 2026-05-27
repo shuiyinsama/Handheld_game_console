@@ -45,6 +45,8 @@
 # Kernel Module Compile Results
 *.mod*
 *.cmd
+!start-gui.cmd
+!启动掌机控制台.cmd
 .tmp_versions/
 modules.order
 Module.symvers
@@ -53,3 +55,13 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# ESP-IDF generated files
+build/
+sdkconfig
+managed_components/
+tools/web-control/*.log
+tools/gui-task.log
+.gitconfig-build
+.vscode/
+__pycache__/
