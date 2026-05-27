@@ -31,6 +31,15 @@ typedef struct {
     bool last_pressed;
 } handheld_button_t;
 
+typedef enum {
+    BUTTON_BOOT = 0,
+    BUTTON_KEY0,
+    BUTTON_KEY1,
+    BUTTON_KEY2,
+    BUTTON_KEY3,
+    BUTTON_COUNT,
+} button_index_t;
+
 static handheld_button_t s_buttons[] = {
     {.name = "BOOT", .gpio = BOARD_BUTTON_BOOT_GPIO, .xl9555_mask = 0, .active_low = true},
     {.name = "KEY0", .gpio = -1, .xl9555_mask = BOARD_BUTTON_KEY0_MASK, .active_low = true},
@@ -44,6 +53,21 @@ static handheld_button_t s_buttons[] = {
 #define BUTTON_TEST_COUNT  8
 #define BUTTON_TEST_BOX_H  92
 
+#define PLAYFIELD_X        48
+#define PLAYFIELD_Y        36
+#define PLAYFIELD_W        (BOARD_LCD_H_RES - PLAYFIELD_X * 2)
+#define PLAYFIELD_H        260
+#define PLAYER_SIZE        28
+#define PLAYER_SPEED       6
+
+typedef struct {
+    int x;
+    int y;
+    int last_x;
+    int last_y;
+    bool last_action;
+} player_t;
+
 static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
@@ -51,6 +75,7 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 
 static void fill_screen(esp_lcd_panel_handle_t panel, uint16_t color);
 static void draw_button_slot(esp_lcd_panel_handle_t panel, size_t index);
+static void draw_player(esp_lcd_panel_handle_t panel, const player_t *player);
 
 static int button_test_box_w(void)
 {
@@ -60,7 +85,7 @@ static int button_test_box_w(void)
 
 static int button_test_y(void)
 {
-    return (BOARD_LCD_V_RES - BUTTON_TEST_BOX_H) / 2;
+    return BOARD_LCD_V_RES - BUTTON_TEST_BOX_H - 36;
 }
 
 static esp_err_t xl9555_write_reg(uint8_t reg, uint8_t value)
@@ -127,7 +152,7 @@ static void input_init(void)
 {
     uint64_t pin_mask = 0;
     bool has_gpio_input = false;
-    for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
+    for (size_t i = 0; i < BUTTON_COUNT; i++) {
         if (s_buttons[i].gpio >= 0) {
             pin_mask |= 1ULL << s_buttons[i].gpio;
             has_gpio_input = true;
@@ -154,7 +179,7 @@ static bool input_scan(void)
     uint16_t xl9555_inputs = 0xFFFF;
     bool needs_xl9555 = false;
 
-    for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
+    for (size_t i = 0; i < BUTTON_COUNT; i++) {
         needs_xl9555 |= s_buttons[i].xl9555_mask != 0;
     }
 
@@ -162,7 +187,7 @@ static bool input_scan(void)
         ESP_ERROR_CHECK(xl9555_read_inputs(&xl9555_inputs));
     }
 
-    for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
+    for (size_t i = 0; i < BUTTON_COUNT; i++) {
         bool pressed = false;
 
         if (s_buttons[i].gpio >= 0) {
@@ -280,9 +305,12 @@ static void lcd_fill_rect(esp_lcd_panel_handle_t panel, int x0, int y0, int w, i
     heap_caps_free(line);
 }
 
-static void draw_button_test_screen(esp_lcd_panel_handle_t panel)
+static void draw_game_screen(esp_lcd_panel_handle_t panel, const player_t *player)
 {
     fill_screen(panel, rgb565(20, 24, 28));
+
+    lcd_fill_rect(panel, PLAYFIELD_X - 4, PLAYFIELD_Y - 4, PLAYFIELD_W + 8, PLAYFIELD_H + 8, rgb565(76, 86, 96));
+    lcd_fill_rect(panel, PLAYFIELD_X, PLAYFIELD_Y, PLAYFIELD_W, PLAYFIELD_H, rgb565(28, 34, 40));
 
     const int box_w = button_test_box_w();
     const int y = button_test_y();
@@ -293,9 +321,11 @@ static void draw_button_test_screen(esp_lcd_panel_handle_t panel)
         lcd_fill_rect(panel, x + 4, y + 4, box_w - 8, BUTTON_TEST_BOX_H - 8, rgb565(32, 38, 44));
     }
 
-    for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
+    for (size_t i = 0; i < BUTTON_COUNT; i++) {
         draw_button_slot(panel, i);
     }
+
+    draw_player(panel, player);
 }
 
 static void draw_button_slot(esp_lcd_panel_handle_t panel, size_t index)
@@ -316,6 +346,56 @@ static void fill_screen(esp_lcd_panel_handle_t panel, uint16_t color)
     lcd_fill_rect(panel, 0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, color);
 }
 
+static void draw_player(esp_lcd_panel_handle_t panel, const player_t *player)
+{
+    const uint16_t body = s_buttons[BUTTON_BOOT].pressed ? rgb565(235, 220, 92) : rgb565(76, 170, 235);
+    lcd_fill_rect(panel, player->x, player->y, PLAYER_SIZE, PLAYER_SIZE, body);
+    lcd_fill_rect(panel, player->x + 6, player->y + 7, 5, 8, rgb565(8, 12, 16));
+    lcd_fill_rect(panel, player->x + PLAYER_SIZE - 11, player->y + 7, 5, 8, rgb565(8, 12, 16));
+}
+
+static void erase_player(esp_lcd_panel_handle_t panel, const player_t *player)
+{
+    lcd_fill_rect(panel, player->last_x, player->last_y, PLAYER_SIZE, PLAYER_SIZE, rgb565(28, 34, 40));
+}
+
+static bool update_player(player_t *player)
+{
+    player->last_x = player->x;
+    player->last_y = player->y;
+
+    if (s_buttons[BUTTON_KEY2].pressed) {
+        player->x -= PLAYER_SPEED;
+    }
+    if (s_buttons[BUTTON_KEY0].pressed) {
+        player->x += PLAYER_SPEED;
+    }
+    if (s_buttons[BUTTON_KEY3].pressed) {
+        player->y -= PLAYER_SPEED;
+    }
+    if (s_buttons[BUTTON_KEY1].pressed) {
+        player->y += PLAYER_SPEED;
+    }
+
+    if (player->x < PLAYFIELD_X) {
+        player->x = PLAYFIELD_X;
+    }
+    if (player->y < PLAYFIELD_Y) {
+        player->y = PLAYFIELD_Y;
+    }
+    if (player->x > PLAYFIELD_X + PLAYFIELD_W - PLAYER_SIZE) {
+        player->x = PLAYFIELD_X + PLAYFIELD_W - PLAYER_SIZE;
+    }
+    if (player->y > PLAYFIELD_Y + PLAYFIELD_H - PLAYER_SIZE) {
+        player->y = PLAYFIELD_Y + PLAYFIELD_H - PLAYER_SIZE;
+    }
+
+    const bool action_changed = s_buttons[BUTTON_BOOT].pressed != player->last_action;
+    player->last_action = s_buttons[BUTTON_BOOT].pressed;
+
+    return player->x != player->last_x || player->y != player->last_y || action_changed;
+}
+
 void app_main(void)
 {
     ESP_LOGI(TAG, "Booting handheld LCD bring-up");
@@ -324,20 +404,34 @@ void app_main(void)
     lcd_backlight_on();
 
     esp_lcd_panel_handle_t panel = lcd_init();
+    player_t player = {
+        .x = PLAYFIELD_X + (PLAYFIELD_W - PLAYER_SIZE) / 2,
+        .y = PLAYFIELD_Y + (PLAYFIELD_H - PLAYER_SIZE) / 2,
+        .last_x = PLAYFIELD_X + (PLAYFIELD_W - PLAYER_SIZE) / 2,
+        .last_y = PLAYFIELD_Y + (PLAYFIELD_H - PLAYER_SIZE) / 2,
+        .last_action = false,
+    };
 
     input_scan();
-    draw_button_test_screen(panel);
+    draw_game_screen(panel, &player);
 
-    ESP_LOGI(TAG, "Button test screen drawn");
+    ESP_LOGI(TAG, "Input game loop started");
 
     while (true) {
-        if (input_scan()) {
-            for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
+        const bool input_changed = input_scan();
+        if (input_changed) {
+            for (size_t i = 0; i < BUTTON_COUNT; i++) {
                 if (s_buttons[i].pressed != s_buttons[i].last_pressed) {
                     draw_button_slot(panel, i);
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+
+        if (update_player(&player)) {
+            erase_player(panel, &player);
+            draw_player(panel, &player);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(33));
     }
 }
