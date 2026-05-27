@@ -18,19 +18,25 @@ static const char *TAG = "handheld";
 
 #define I2C_MASTER_PORT        I2C_NUM_0
 #define I2C_MASTER_FREQ_HZ     400000
+#define XL9555_REG_INPUT0      0x00
 #define XL9555_REG_OUTPUT0     0x02
 #define XL9555_REG_CONFIG0     0x06
 
 typedef struct {
     const char *name;
     int gpio;
+    uint16_t xl9555_mask;
     bool active_low;
     bool pressed;
     bool last_pressed;
 } handheld_button_t;
 
 static handheld_button_t s_buttons[] = {
-    {.name = "BOOT", .gpio = BOARD_BUTTON_BOOT_GPIO, .active_low = true},
+    {.name = "BOOT", .gpio = BOARD_BUTTON_BOOT_GPIO, .xl9555_mask = 0, .active_low = true},
+    {.name = "KEY0", .gpio = -1, .xl9555_mask = BOARD_BUTTON_KEY0_MASK, .active_low = true},
+    {.name = "KEY1", .gpio = -1, .xl9555_mask = BOARD_BUTTON_KEY1_MASK, .active_low = true},
+    {.name = "KEY2", .gpio = -1, .xl9555_mask = BOARD_BUTTON_KEY2_MASK, .active_low = true},
+    {.name = "KEY3", .gpio = -1, .xl9555_mask = BOARD_BUTTON_KEY3_MASK, .active_low = true},
 };
 
 #define BUTTON_TEST_MARGIN 48
@@ -44,7 +50,7 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 }
 
 static void fill_screen(esp_lcd_panel_handle_t panel, uint16_t color);
-static void draw_boot_button(esp_lcd_panel_handle_t panel);
+static void draw_button_slot(esp_lcd_panel_handle_t panel, size_t index);
 
 static int button_test_box_w(void)
 {
@@ -79,6 +85,29 @@ static esp_err_t xl9555_read_reg(uint8_t reg, uint8_t *value)
         pdMS_TO_TICKS(100));
 }
 
+static esp_err_t xl9555_write_reg_pair(uint8_t reg, uint16_t value)
+{
+    const uint8_t data[3] = {
+        reg,
+        (uint8_t)(value & 0xFF),
+        (uint8_t)(value >> 8),
+    };
+
+    return i2c_master_write_to_device(I2C_MASTER_PORT, BOARD_XL9555_I2C_ADDR, data, sizeof(data), pdMS_TO_TICKS(100));
+}
+
+static esp_err_t xl9555_read_inputs(uint16_t *inputs)
+{
+    uint8_t port0 = 0;
+    uint8_t port1 = 0;
+
+    ESP_RETURN_ON_ERROR(xl9555_read_reg(XL9555_REG_INPUT0, &port0), TAG, "XL9555 input0 read failed");
+    ESP_RETURN_ON_ERROR(xl9555_read_reg(XL9555_REG_INPUT0 + 1, &port1), TAG, "XL9555 input1 read failed");
+
+    *inputs = ((uint16_t)port1 << 8) | port0;
+    return ESP_OK;
+}
+
 static esp_err_t board_i2c_init(void)
 {
     i2c_config_t i2c_config = {
@@ -97,33 +126,53 @@ static esp_err_t board_i2c_init(void)
 static void input_init(void)
 {
     uint64_t pin_mask = 0;
+    bool has_gpio_input = false;
     for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
         if (s_buttons[i].gpio >= 0) {
             pin_mask |= 1ULL << s_buttons[i].gpio;
+            has_gpio_input = true;
         }
     }
 
-    gpio_config_t input_config = {
-        .pin_bit_mask = pin_mask,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    ESP_ERROR_CHECK(gpio_config(&input_config));
+    if (has_gpio_input) {
+        gpio_config_t input_config = {
+            .pin_bit_mask = pin_mask,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        ESP_ERROR_CHECK(gpio_config(&input_config));
+    }
+
+    ESP_ERROR_CHECK(xl9555_write_reg_pair(XL9555_REG_CONFIG0, BOARD_XL9555_CONFIG_VALUE));
 }
 
 static bool input_scan(void)
 {
     bool changed = false;
+    uint16_t xl9555_inputs = 0xFFFF;
+    bool needs_xl9555 = false;
 
     for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
-        if (s_buttons[i].gpio < 0) {
-            continue;
+        needs_xl9555 |= s_buttons[i].xl9555_mask != 0;
+    }
+
+    if (needs_xl9555) {
+        ESP_ERROR_CHECK(xl9555_read_inputs(&xl9555_inputs));
+    }
+
+    for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
+        bool pressed = false;
+
+        if (s_buttons[i].gpio >= 0) {
+            const int level = gpio_get_level(s_buttons[i].gpio);
+            pressed = s_buttons[i].active_low ? (level == 0) : (level != 0);
+        } else if (s_buttons[i].xl9555_mask != 0) {
+            const bool level_high = (xl9555_inputs & s_buttons[i].xl9555_mask) != 0;
+            pressed = s_buttons[i].active_low ? !level_high : level_high;
         }
 
-        const int level = gpio_get_level(s_buttons[i].gpio);
-        const bool pressed = s_buttons[i].active_low ? (level == 0) : (level != 0);
         s_buttons[i].last_pressed = s_buttons[i].pressed;
         s_buttons[i].pressed = pressed;
 
@@ -244,20 +293,22 @@ static void draw_button_test_screen(esp_lcd_panel_handle_t panel)
         lcd_fill_rect(panel, x + 4, y + 4, box_w - 8, BUTTON_TEST_BOX_H - 8, rgb565(32, 38, 44));
     }
 
-    draw_boot_button(panel);
+    for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
+        draw_button_slot(panel, i);
+    }
 }
 
-static void draw_boot_button(esp_lcd_panel_handle_t panel)
+static void draw_button_slot(esp_lcd_panel_handle_t panel, size_t index)
 {
     const int box_w = button_test_box_w();
     const int y = button_test_y();
+    const int x = BUTTON_TEST_MARGIN + (int)index * (box_w + BUTTON_TEST_GAP);
 
-    const uint16_t boot_color = s_buttons[0].pressed ? rgb565(80, 220, 120) : rgb565(82, 96, 108);
-    lcd_fill_rect(panel, BUTTON_TEST_MARGIN + 4, y + 4, box_w - 8, BUTTON_TEST_BOX_H - 8, boot_color);
+    const uint16_t color = s_buttons[index].pressed ? rgb565(80, 220, 120) : rgb565(82, 96, 108);
+    lcd_fill_rect(panel, x + 4, y + 4, box_w - 8, BUTTON_TEST_BOX_H - 8, color);
 
-    /* Small fixed markers: left is BOOT/K0, remaining slots are future D-pad/A/B/Start/Select. */
-    lcd_fill_rect(panel, BUTTON_TEST_MARGIN + 18, y + 18, box_w - 36, 10, rgb565(10, 14, 18));
-    lcd_fill_rect(panel, BUTTON_TEST_MARGIN + 18, y + BUTTON_TEST_BOX_H - 28, box_w - 36, 10, rgb565(10, 14, 18));
+    lcd_fill_rect(panel, x + 18, y + 18, box_w - 36, 10, rgb565(10, 14, 18));
+    lcd_fill_rect(panel, x + 18, y + BUTTON_TEST_BOX_H - 28, box_w - 36, 10, rgb565(10, 14, 18));
 }
 
 static void fill_screen(esp_lcd_panel_handle_t panel, uint16_t color)
@@ -281,7 +332,11 @@ void app_main(void)
 
     while (true) {
         if (input_scan()) {
-            draw_boot_button(panel);
+            for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
+                if (s_buttons[i].pressed != s_buttons[i].last_pressed) {
+                    draw_button_slot(panel, i);
+                }
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }

@@ -42,6 +42,16 @@
 #define BOARD_XL9555_LCD_BL_BIT    3
 #define BOARD_LCD_BK_LIGHT_ON      1
 
+/*
+ * XL9555 pin masks from ALIENTEK's BSP:
+ * P1_7..P1_4 are KEY0..KEY3, active low.
+ */
+#define BOARD_XL9555_CONFIG_VALUE  0xF003
+#define BOARD_BUTTON_KEY0_MASK     0x8000
+#define BOARD_BUTTON_KEY1_MASK     0x4000
+#define BOARD_BUTTON_KEY2_MASK     0x2000
+#define BOARD_BUTTON_KEY3_MASK     0x1000
+
 /* First input bring-up uses the onboard BOOT/K0 button. Active low. */
 #define BOARD_BUTTON_BOOT_GPIO     0
 
