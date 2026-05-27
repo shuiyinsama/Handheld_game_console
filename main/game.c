@@ -5,6 +5,8 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "storage.h"
+#include <stdio.h>
 
 static const char *TAG = "game";
 
@@ -21,7 +23,8 @@ static const char *TAG = "game";
 #define PLAYER_SPEED       6
 #define TARGET_SIZE        20
 #define SCORE_MAX          10
-#define MENU_COUNT         3
+#define MENU_COUNT         4
+#define ROM_LIST_MAX       8
 
 typedef struct {
     int x;
@@ -45,6 +48,8 @@ typedef struct {
 
 typedef enum {
     SCREEN_MENU = 0,
+    SCREEN_ROM_BROWSER,
+    SCREEN_ROM_INFO,
     SCREEN_COLLECT,
     SCREEN_INPUT_TEST,
     SCREEN_ABOUT,
@@ -53,10 +58,17 @@ typedef enum {
 typedef struct {
     screen_t screen;
     uint8_t selected;
+    uint8_t rom_selected;
+    size_t rom_count;
+    esp_err_t rom_status;
+    storage_rom_info_t rom_info;
+    esp_err_t rom_info_status;
+    char rom_names[ROM_LIST_MAX][STORAGE_ROM_NAME_MAX];
     game_state_t collect;
 } app_state_t;
 
 static const char *s_menu_items[MENU_COUNT] = {
+    "ROM BROWSER",
     "COLLECT DEMO",
     "INPUT TEST",
     "ABOUT",
@@ -64,6 +76,10 @@ static const char *s_menu_items[MENU_COUNT] = {
 
 static const uint8_t *glyph_rows(char ch)
 {
+    if (ch >= 'a' && ch <= 'z') {
+        ch = (char)(ch - 'a' + 'A');
+    }
+
     static const uint8_t space[7] = {0, 0, 0, 0, 0, 0, 0};
     static const uint8_t a[7] = {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
     static const uint8_t b[7] = {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E};
@@ -74,12 +90,14 @@ static const uint8_t *glyph_rows(char ch)
     static const uint8_t g[7] = {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0E};
     static const uint8_t h[7] = {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
     static const uint8_t i[7] = {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E};
+    static const uint8_t j[7] = {0x01, 0x01, 0x01, 0x01, 0x11, 0x11, 0x0E};
     static const uint8_t k[7] = {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11};
     static const uint8_t l[7] = {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F};
     static const uint8_t m[7] = {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11};
     static const uint8_t n[7] = {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
     static const uint8_t o[7] = {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
     static const uint8_t p[7] = {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10};
+    static const uint8_t q[7] = {0x0E, 0x11, 0x11, 0x11, 0x15, 0x12, 0x0D};
     static const uint8_t r[7] = {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11};
     static const uint8_t s[7] = {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E};
     static const uint8_t t[7] = {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
@@ -88,7 +106,10 @@ static const uint8_t *glyph_rows(char ch)
     static const uint8_t w[7] = {0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11};
     static const uint8_t x[7] = {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11};
     static const uint8_t y[7] = {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04};
+    static const uint8_t z[7] = {0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F};
     static const uint8_t plus[7] = {0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00};
+    static const uint8_t dot[7] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C};
+    static const uint8_t dash[7] = {0x00, 0x00, 0x00, 0x1F, 0x00, 0x00, 0x00};
     static const uint8_t zero[7] = {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E};
     static const uint8_t one[7] = {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E};
     static const uint8_t two[7] = {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F};
@@ -110,12 +131,14 @@ static const uint8_t *glyph_rows(char ch)
     case 'G': return g;
     case 'H': return h;
     case 'I': return i;
+    case 'J': return j;
     case 'K': return k;
     case 'L': return l;
     case 'M': return m;
     case 'N': return n;
     case 'O': return o;
     case 'P': return p;
+    case 'Q': return q;
     case 'R': return r;
     case 'S': return s;
     case 'T': return t;
@@ -124,7 +147,11 @@ static const uint8_t *glyph_rows(char ch)
     case 'W': return w;
     case 'X': return x;
     case 'Y': return y;
+    case 'Z': return z;
     case '+': return plus;
+    case '.': return dot;
+    case '-':
+    case '_': return dash;
     case '0': return zero;
     case '1': return one;
     case '2': return two;
@@ -272,7 +299,7 @@ static void draw_menu(const app_state_t *app)
 
     for (uint8_t i = 0; i < MENU_COUNT; i++) {
         const int x = 88;
-        const int y = 164 + i * 72;
+        const int y = 142 + i * 64;
         const bool selected = i == app->selected;
         const uint16_t border = selected ? board_rgb565(235, 220, 92) : board_rgb565(68, 78, 88);
         const uint16_t fill = selected ? board_rgb565(48, 58, 68) : board_rgb565(28, 34, 40);
@@ -285,6 +312,151 @@ static void draw_menu(const app_state_t *app)
     draw_text(540, 360, "KEY3 UP", board_rgb565(110, 124, 136), 2);
     draw_text(540, 384, "KEY1 DOWN", board_rgb565(110, 124, 136), 2);
     draw_text(540, 408, "BOOT OK", board_rgb565(110, 124, 136), 2);
+}
+
+static void refresh_rom_list(app_state_t *app)
+{
+    app->rom_count = 0;
+    app->rom_selected = 0;
+    app->rom_status = storage_list_roms(app->rom_names, ROM_LIST_MAX, &app->rom_count);
+}
+
+static const char *cartridge_type_name(uint8_t type)
+{
+    switch (type) {
+    case 0x00: return "ROM ONLY";
+    case 0x01: return "MBC1";
+    case 0x02: return "MBC1 RAM";
+    case 0x03: return "MBC1 BAT";
+    case 0x05: return "MBC2";
+    case 0x06: return "MBC2 BAT";
+    case 0x08: return "ROM RAM";
+    case 0x09: return "ROM BAT";
+    case 0x0F: return "MBC3 TIMER";
+    case 0x10: return "MBC3 BAT";
+    case 0x11: return "MBC3";
+    case 0x12: return "MBC3 RAM";
+    case 0x13: return "MBC3 BAT";
+    case 0x19: return "MBC5";
+    case 0x1A: return "MBC5 RAM";
+    case 0x1B: return "MBC5 BAT";
+    default: return "UNKNOWN";
+    }
+}
+
+static const char *rom_size_name(uint8_t code)
+{
+    switch (code) {
+    case 0x00: return "32KB";
+    case 0x01: return "64KB";
+    case 0x02: return "128KB";
+    case 0x03: return "256KB";
+    case 0x04: return "512KB";
+    case 0x05: return "1MB";
+    case 0x06: return "2MB";
+    case 0x07: return "4MB";
+    case 0x08: return "8MB";
+    default: return "UNKNOWN";
+    }
+}
+
+static const char *ram_size_name(uint8_t code)
+{
+    switch (code) {
+    case 0x00: return "NO RAM";
+    case 0x01: return "2KB";
+    case 0x02: return "8KB";
+    case 0x03: return "32KB";
+    case 0x04: return "128KB";
+    case 0x05: return "64KB";
+    default: return "UNKNOWN";
+    }
+}
+
+static const char *cgb_mode_name(uint8_t flag)
+{
+    if (flag == 0x80) {
+        return "GB CGB";
+    }
+    if (flag == 0xC0) {
+        return "CGB ONLY";
+    }
+    return "DMG";
+}
+
+static void draw_rom_browser(const app_state_t *app)
+{
+    board_fill_screen(board_rgb565(18, 23, 30));
+    draw_text(54, 42, "ROM BROWSER", board_rgb565(235, 220, 92), 4);
+
+    if (app->rom_status != ESP_OK) {
+        draw_text(58, 132, "SD MOUNT FAIL", board_rgb565(236, 92, 92), 3);
+        draw_text(58, 184, "CHECK TF CARD", board_rgb565(160, 178, 190), 3);
+        draw_text(58, 248, "FAT32 ONLY", board_rgb565(160, 178, 190), 3);
+    } else if (app->rom_count == 0) {
+        draw_text(58, 132, "NO GB ROMS", board_rgb565(236, 164, 92), 3);
+        draw_text(58, 184, "COPY .GB FILES", board_rgb565(160, 178, 190), 3);
+        draw_text(58, 224, "TO TF ROOT", board_rgb565(160, 178, 190), 3);
+    } else {
+        for (size_t i = 0; i < app->rom_count; i++) {
+            const int x = 68;
+            const int y = 120 + (int)i * 38;
+            const bool selected = i == app->rom_selected;
+            board_fill_rect(x - 8, y - 6, 520, 32, selected ? board_rgb565(58, 70, 82) : board_rgb565(24, 30, 36));
+            draw_text(x, y, app->rom_names[i], selected ? board_rgb565(255, 255, 255) : board_rgb565(158, 172, 184), 2);
+        }
+    }
+
+    draw_text(560, 354, "BOOT OPEN", board_rgb565(110, 124, 136), 2);
+    draw_text(560, 380, "KEY2 BACK", board_rgb565(110, 124, 136), 2);
+    draw_text(560, 406, "KEY0 REFRESH", board_rgb565(110, 124, 136), 2);
+}
+
+static void open_selected_rom(app_state_t *app)
+{
+    if (app->rom_status != ESP_OK || app->rom_count == 0 || app->rom_selected >= app->rom_count) {
+        return;
+    }
+    app->rom_info_status = storage_read_rom_info(app->rom_names[app->rom_selected], &app->rom_info);
+    app->screen = SCREEN_ROM_INFO;
+}
+
+static void draw_rom_info(const app_state_t *app)
+{
+    char line[48] = {0};
+
+    board_fill_screen(board_rgb565(18, 23, 30));
+    draw_text(54, 42, "ROM INFO", board_rgb565(235, 220, 92), 4);
+
+    if (app->rom_info_status != ESP_OK) {
+        draw_text(58, 132, "READ FAIL", board_rgb565(236, 92, 92), 3);
+        snprintf(line, sizeof(line), "ERR 0x%X", (unsigned int)app->rom_info_status);
+        draw_text(58, 184, line, board_rgb565(160, 178, 190), 3);
+    } else {
+        snprintf(line, sizeof(line), "FILE %s", app->rom_names[app->rom_selected]);
+        draw_text(58, 112, line, board_rgb565(160, 178, 190), 2);
+
+        snprintf(line, sizeof(line), "TITLE %s", app->rom_info.title);
+        draw_text(58, 160, line, board_rgb565(255, 255, 255), 3);
+
+        snprintf(line, sizeof(line), "TYPE %s", cartridge_type_name(app->rom_info.cartridge_type));
+        draw_text(58, 214, line, board_rgb565(160, 178, 190), 2);
+
+        snprintf(line, sizeof(line), "ROM %s RAM %s", rom_size_name(app->rom_info.rom_size_code), ram_size_name(app->rom_info.ram_size_code));
+        draw_text(58, 248, line, board_rgb565(160, 178, 190), 2);
+
+        snprintf(line, sizeof(line), "MODE %s", cgb_mode_name(app->rom_info.cgb_flag));
+        draw_text(58, 282, line, board_rgb565(160, 178, 190), 2);
+
+        draw_text(
+            58,
+            334,
+            app->rom_info.header_checksum_ok ? "HEADER OK" : "HEADER BAD",
+            app->rom_info.header_checksum_ok ? board_rgb565(80, 220, 120) : board_rgb565(236, 92, 92),
+            3);
+    }
+
+    draw_text(560, 406, "BOOT BACK", board_rgb565(110, 124, 136), 2);
 }
 
 static bool update_player(const board_input_t *input, player_t *player)
@@ -387,10 +559,14 @@ void game_run(void)
                 }
                 if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
                     if (app.selected == 0) {
+                        app.screen = SCREEN_ROM_BROWSER;
+                        refresh_rom_list(&app);
+                        draw_rom_browser(&app);
+                    } else if (app.selected == 1) {
                         app.screen = SCREEN_COLLECT;
                         reset_game(&app.collect);
                         draw_collect_screen(&input, &app.collect);
-                    } else if (app.selected == 1) {
+                    } else if (app.selected == 2) {
                         app.screen = SCREEN_INPUT_TEST;
                         draw_input_test(&input);
                     } else {
@@ -398,6 +574,42 @@ void game_run(void)
                         draw_about();
                     }
                 }
+            }
+            vTaskDelay(pdMS_TO_TICKS(33));
+            continue;
+        }
+
+        if (app.screen == SCREEN_ROM_BROWSER) {
+            if (input_changed) {
+                if (input.changed[BOARD_BUTTON_KEY2] && input.pressed[BOARD_BUTTON_KEY2]) {
+                    app.screen = SCREEN_MENU;
+                    draw_menu(&app);
+                } else if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
+                    open_selected_rom(&app);
+                    if (app.screen == SCREEN_ROM_INFO) {
+                        draw_rom_info(&app);
+                    }
+                } else if (input.changed[BOARD_BUTTON_KEY0] && input.pressed[BOARD_BUTTON_KEY0]) {
+                    refresh_rom_list(&app);
+                    draw_rom_browser(&app);
+                } else if (input.changed[BOARD_BUTTON_KEY3] && input.pressed[BOARD_BUTTON_KEY3] && app.rom_selected > 0) {
+                    app.rom_selected--;
+                    draw_rom_browser(&app);
+                } else if (input.changed[BOARD_BUTTON_KEY1] &&
+                           input.pressed[BOARD_BUTTON_KEY1] &&
+                           app.rom_selected + 1 < app.rom_count) {
+                    app.rom_selected++;
+                    draw_rom_browser(&app);
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(33));
+            continue;
+        }
+
+        if (app.screen == SCREEN_ROM_INFO) {
+            if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
+                app.screen = SCREEN_ROM_BROWSER;
+                draw_rom_browser(&app);
             }
             vTaskDelay(pdMS_TO_TICKS(33));
             continue;

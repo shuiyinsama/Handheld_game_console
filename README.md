@@ -1,3 +1,22 @@
+# SD / ROM browser
+
+The on-board TF slot is wired as SPI2:
+
+- MOSI: GPIO11
+- CLK: GPIO12
+- MISO: GPIO13
+- CS: GPIO2
+
+Format the TF card as FAT32, then copy `.gb` or `.gbc` files to the card root.
+After flashing, open `ROM BROWSER` from the main menu. Select a ROM and press
+`BOOT` to read its Game Boy header before the emulator core is connected.
+
+- `KEY3`: move up
+- `KEY1`: move down
+- `KEY0`: refresh SD / ROM list
+- `KEY2`: back to menu
+- `BOOT`: open selected ROM / return from ROM info
+
 # Handheld Game Console
 
 第一版目标：使用正点原子 `ATK_DNESP32S3 V1.3` 和 4.3 寸 RGBLCD 做掌机原型。

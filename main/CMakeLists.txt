@@ -3,6 +3,12 @@ idf_component_register(
         "app_main.c"
         "board.c"
         "game.c"
+        "storage.c"
     INCLUDE_DIRS
         "."
+    REQUIRES
+        driver
+        esp_lcd
+        fatfs
+        sdmmc
 )

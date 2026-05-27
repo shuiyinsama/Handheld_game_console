@@ -55,6 +55,12 @@
 /* First input bring-up uses the onboard BOOT/K0 button. Active low. */
 #define BOARD_BUTTON_BOOT_GPIO     0
 
+/* On-board TF card slot. ALIENTEK's SD example drives it through SPI2. */
+#define BOARD_SD_SPI_MOSI_GPIO     11
+#define BOARD_SD_SPI_CLK_GPIO      12
+#define BOARD_SD_SPI_MISO_GPIO     13
+#define BOARD_SD_SPI_CS_GPIO       2
+
 /*
  * RGB565 data bus order expected by esp_lcd RGB panel:
  * B0..B4, G0..G5, R0..R4
