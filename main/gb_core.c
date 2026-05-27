@@ -43,10 +43,42 @@ static void gb_core_set_hl(gb_core_t *core, uint16_t value)
     set16(&core->h, &core->l, value);
 }
 
+static size_t rom_bank_count(const gb_core_t *core)
+{
+    const size_t banks = core->rom_size / 0x4000;
+    return banks == 0 ? 1 : banks;
+}
+
+static uint8_t read_rom_bank(const gb_core_t *core, uint16_t bank, uint16_t offset)
+{
+    const size_t banks = rom_bank_count(core);
+    bank %= banks;
+    const size_t addr = (size_t)bank * 0x4000 + offset;
+    return addr < core->rom_size ? core->rom[addr] : 0xFF;
+}
+
+static bool is_mbc1(const gb_core_t *core)
+{
+    return core->cartridge_type == 0x01 || core->cartridge_type == 0x02 || core->cartridge_type == 0x03;
+}
+
+static bool is_mbc3(const gb_core_t *core)
+{
+    return core->cartridge_type >= 0x0F && core->cartridge_type <= 0x13;
+}
+
+static bool is_mbc5(const gb_core_t *core)
+{
+    return core->cartridge_type >= 0x19 && core->cartridge_type <= 0x1E;
+}
+
 static uint8_t read8(const gb_core_t *core, uint16_t addr)
 {
-    if (addr < 0x8000) {
+    if (addr < 0x4000) {
         return addr < core->rom_size ? core->rom[addr] : 0xFF;
+    }
+    if (addr < 0x8000) {
+        return read_rom_bank(core, core->rom_bank, addr - 0x4000);
     }
     if (addr < 0xA000) {
         return core->vram[addr - 0x8000];
@@ -81,6 +113,48 @@ static uint8_t read8(const gb_core_t *core, uint16_t addr)
 static void write8(gb_core_t *core, uint16_t addr, uint8_t value)
 {
     if (addr < 0x8000) {
+        if (is_mbc1(core)) {
+            if (addr < 0x2000) {
+                core->ram_enabled = (value & 0x0F) == 0x0A;
+            } else if (addr < 0x4000) {
+                core->rom_bank = (core->rom_bank & 0x60) | (value & 0x1F);
+                if ((core->rom_bank & 0x1F) == 0) {
+                    core->rom_bank++;
+                }
+            } else if (addr < 0x6000) {
+                if (core->banking_mode == 0) {
+                    core->rom_bank = (core->rom_bank & 0x1F) | ((value & 0x03) << 5);
+                    if ((core->rom_bank & 0x1F) == 0) {
+                        core->rom_bank++;
+                    }
+                } else {
+                    core->ram_bank = value & 0x03;
+                }
+            } else {
+                core->banking_mode = value & 0x01;
+            }
+        } else if (is_mbc3(core)) {
+            if (addr < 0x2000) {
+                core->ram_enabled = (value & 0x0F) == 0x0A;
+            } else if (addr < 0x4000) {
+                core->rom_bank = value & 0x7F;
+                if (core->rom_bank == 0) {
+                    core->rom_bank = 1;
+                }
+            } else if (addr < 0x6000) {
+                core->ram_bank = value & 0x03;
+            }
+        } else if (is_mbc5(core)) {
+            if (addr < 0x2000) {
+                core->ram_enabled = (value & 0x0F) == 0x0A;
+            } else if (addr < 0x3000) {
+                core->rom_bank = (core->rom_bank & 0x100) | value;
+            } else if (addr < 0x4000) {
+                core->rom_bank = (core->rom_bank & 0x0FF) | ((uint16_t)(value & 0x01) << 8);
+            } else if (addr < 0x6000) {
+                core->ram_bank = value & 0x0F;
+            }
+        }
         return;
     }
     if (addr < 0xA000) {
@@ -129,6 +203,12 @@ static uint16_t fetch16(gb_core_t *core)
     const uint8_t lo = fetch8(core);
     const uint8_t hi = fetch8(core);
     return make16(hi, lo);
+}
+
+static void write16(gb_core_t *core, uint16_t addr, uint16_t value)
+{
+    write8(core, addr, (uint8_t)value);
+    write8(core, (uint16_t)(addr + 1), (uint8_t)(value >> 8));
 }
 
 static void push16(gb_core_t *core, uint16_t value)
@@ -191,6 +271,17 @@ static void add_a(gb_core_t *core, uint8_t value)
     core->a = (uint8_t)result;
 }
 
+static void adc_a(gb_core_t *core, uint8_t value)
+{
+    const uint8_t carry = flag_is_set(core, FLAG_C) ? 1 : 0;
+    const uint16_t result = (uint16_t)core->a + value + carry;
+    set_flag(core, FLAG_Z, (uint8_t)result == 0);
+    set_flag(core, FLAG_N, false);
+    set_flag(core, FLAG_H, ((core->a & 0x0F) + (value & 0x0F) + carry) > 0x0F);
+    set_flag(core, FLAG_C, result > 0xFF);
+    core->a = (uint8_t)result;
+}
+
 static void sub_a(gb_core_t *core, uint8_t value)
 {
     const uint8_t old = core->a;
@@ -199,6 +290,57 @@ static void sub_a(gb_core_t *core, uint8_t value)
     set_flag(core, FLAG_N, true);
     set_flag(core, FLAG_H, (old & 0x0F) < (value & 0x0F));
     set_flag(core, FLAG_C, old < value);
+}
+
+static void sbc_a(gb_core_t *core, uint8_t value)
+{
+    const uint8_t carry = flag_is_set(core, FLAG_C) ? 1 : 0;
+    const uint8_t old = core->a;
+    const uint16_t result = (uint16_t)core->a - value - carry;
+    core->a = (uint8_t)result;
+    set_flag(core, FLAG_Z, core->a == 0);
+    set_flag(core, FLAG_N, true);
+    set_flag(core, FLAG_H, (old & 0x0F) < ((value & 0x0F) + carry));
+    set_flag(core, FLAG_C, old < (uint16_t)value + carry);
+}
+
+static void add_hl(gb_core_t *core, uint16_t value)
+{
+    const uint16_t hl = gb_core_hl(core);
+    const uint32_t result = (uint32_t)hl + value;
+    set_flag(core, FLAG_N, false);
+    set_flag(core, FLAG_H, ((hl & 0x0FFF) + (value & 0x0FFF)) > 0x0FFF);
+    set_flag(core, FLAG_C, result > 0xFFFF);
+    gb_core_set_hl(core, (uint16_t)result);
+}
+
+static void daa(gb_core_t *core)
+{
+    uint8_t adjust = 0;
+    bool carry = flag_is_set(core, FLAG_C);
+
+    if (!flag_is_set(core, FLAG_N)) {
+        if (flag_is_set(core, FLAG_H) || (core->a & 0x0F) > 9) {
+            adjust |= 0x06;
+        }
+        if (carry || core->a > 0x99) {
+            adjust |= 0x60;
+            carry = true;
+        }
+        core->a = (uint8_t)(core->a + adjust);
+    } else {
+        if (flag_is_set(core, FLAG_H)) {
+            adjust |= 0x06;
+        }
+        if (carry) {
+            adjust |= 0x60;
+        }
+        core->a = (uint8_t)(core->a - adjust);
+    }
+
+    set_flag(core, FLAG_Z, core->a == 0);
+    set_flag(core, FLAG_H, false);
+    set_flag(core, FLAG_C, carry);
 }
 
 static void cp_a(gb_core_t *core, uint8_t value)
@@ -246,11 +388,92 @@ static void write_r(gb_core_t *core, uint8_t index, uint8_t value)
     }
 }
 
+static uint8_t cb_rotate_shift(gb_core_t *core, uint8_t op, uint8_t value)
+{
+    uint8_t result = value;
+    bool carry = false;
+
+    switch ((op >> 3) & 0x07) {
+    case 0:
+        carry = (value & 0x80) != 0;
+        result = (uint8_t)((value << 1) | (carry ? 1 : 0));
+        break;
+    case 1:
+        carry = (value & 0x01) != 0;
+        result = (uint8_t)((value >> 1) | (carry ? 0x80 : 0));
+        break;
+    case 2: {
+        const bool old_carry = flag_is_set(core, FLAG_C);
+        carry = (value & 0x80) != 0;
+        result = (uint8_t)((value << 1) | (old_carry ? 1 : 0));
+        break;
+    }
+    case 3: {
+        const bool old_carry = flag_is_set(core, FLAG_C);
+        carry = (value & 0x01) != 0;
+        result = (uint8_t)((value >> 1) | (old_carry ? 0x80 : 0));
+        break;
+    }
+    case 4:
+        carry = (value & 0x80) != 0;
+        result = (uint8_t)(value << 1);
+        break;
+    case 5:
+        carry = (value & 0x01) != 0;
+        result = (uint8_t)((value >> 1) | (value & 0x80));
+        break;
+    case 6:
+        result = (uint8_t)((value << 4) | (value >> 4));
+        carry = false;
+        break;
+    case 7:
+        carry = (value & 0x01) != 0;
+        result = (uint8_t)(value >> 1);
+        break;
+    }
+
+    set_flag(core, FLAG_Z, result == 0);
+    set_flag(core, FLAG_N, false);
+    set_flag(core, FLAG_H, false);
+    set_flag(core, FLAG_C, carry);
+    return result;
+}
+
+static void execute_cb(gb_core_t *core)
+{
+    const uint8_t op = fetch8(core);
+    core->last_opcode = op;
+    const uint8_t reg_index = op & 0x07;
+    const uint8_t bit = (op >> 3) & 0x07;
+    uint8_t value = read_r(core, reg_index);
+
+    if (op < 0x40) {
+        write_r(core, reg_index, cb_rotate_shift(core, op, value));
+        return;
+    }
+
+    if (op < 0x80) {
+        set_flag(core, FLAG_Z, (value & (1U << bit)) == 0);
+        set_flag(core, FLAG_N, false);
+        set_flag(core, FLAG_H, true);
+        return;
+    }
+
+    if (op < 0xC0) {
+        value = (uint8_t)(value & ~(1U << bit));
+    } else {
+        value = (uint8_t)(value | (1U << bit));
+    }
+    write_r(core, reg_index, value);
+}
+
 void gb_core_init(gb_core_t *core, const uint8_t *rom, size_t rom_size)
 {
     memset(core, 0, sizeof(*core));
     core->rom = rom;
     core->rom_size = rom_size;
+    core->cartridge_type = rom_size > 0x147 ? rom[0x147] : 0;
+    core->rom_bank = 1;
 
     core->a = 0x11;
     core->f = 0x80;
@@ -299,8 +522,20 @@ void gb_core_step(gb_core_t *core)
         return;
     }
 
+    if (opcode >= 0x88 && opcode <= 0x8F) {
+        adc_a(core, read_r(core, opcode & 0x07));
+        core->steps++;
+        return;
+    }
+
     if (opcode >= 0x90 && opcode <= 0x97) {
         sub_a(core, read_r(core, opcode & 0x07));
+        core->steps++;
+        return;
+    }
+
+    if (opcode >= 0x98 && opcode <= 0x9F) {
+        sbc_a(core, read_r(core, opcode & 0x07));
         core->steps++;
         return;
     }
@@ -340,21 +575,52 @@ void gb_core_step(gb_core_t *core)
     case 0x04: core->b = inc8(core, core->b); break;
     case 0x05: core->b = dec8(core, core->b); break;
     case 0x06: core->b = fetch8(core); break;
+    case 0x07: {
+        const bool carry = (core->a & 0x80) != 0;
+        core->a = (uint8_t)((core->a << 1) | (carry ? 1 : 0));
+        core->f = carry ? FLAG_C : 0;
+        break;
+    }
+    case 0x08: write16(core, fetch16(core), core->sp); break;
+    case 0x09: add_hl(core, gb_core_bc(core)); break;
     case 0x0A: core->a = read8(core, gb_core_bc(core)); break;
+    case 0x0B: set16(&core->b, &core->c, (uint16_t)(gb_core_bc(core) - 1)); break;
     case 0x0C: core->c = inc8(core, core->c); break;
     case 0x0D: core->c = dec8(core, core->c); break;
     case 0x0E: core->c = fetch8(core); break;
+    case 0x0F: {
+        const bool carry = (core->a & 0x01) != 0;
+        core->a = (uint8_t)((core->a >> 1) | (carry ? 0x80 : 0));
+        core->f = carry ? FLAG_C : 0;
+        break;
+    }
     case 0x11: set16(&core->d, &core->e, fetch16(core)); break;
     case 0x12: write8(core, gb_core_de(core), core->a); break;
     case 0x13: set16(&core->d, &core->e, (uint16_t)(gb_core_de(core) + 1)); break;
     case 0x14: core->d = inc8(core, core->d); break;
     case 0x15: core->d = dec8(core, core->d); break;
     case 0x16: core->d = fetch8(core); break;
+    case 0x17: {
+        const bool old_carry = flag_is_set(core, FLAG_C);
+        const bool carry = (core->a & 0x80) != 0;
+        core->a = (uint8_t)((core->a << 1) | (old_carry ? 1 : 0));
+        core->f = carry ? FLAG_C : 0;
+        break;
+    }
     case 0x18: core->pc = (uint16_t)(core->pc + (int8_t)fetch8(core)); break;
+    case 0x19: add_hl(core, gb_core_de(core)); break;
     case 0x1A: core->a = read8(core, gb_core_de(core)); break;
+    case 0x1B: set16(&core->d, &core->e, (uint16_t)(gb_core_de(core) - 1)); break;
     case 0x1C: core->e = inc8(core, core->e); break;
     case 0x1D: core->e = dec8(core, core->e); break;
     case 0x1E: core->e = fetch8(core); break;
+    case 0x1F: {
+        const bool old_carry = flag_is_set(core, FLAG_C);
+        const bool carry = (core->a & 0x01) != 0;
+        core->a = (uint8_t)((core->a >> 1) | (old_carry ? 0x80 : 0));
+        core->f = carry ? FLAG_C : 0;
+        break;
+    }
     case 0x20: {
         const int8_t offset = (int8_t)fetch8(core);
         if (!flag_is_set(core, FLAG_Z)) core->pc = (uint16_t)(core->pc + offset);
@@ -366,11 +632,13 @@ void gb_core_step(gb_core_t *core)
     case 0x24: core->h = inc8(core, core->h); break;
     case 0x25: core->h = dec8(core, core->h); break;
     case 0x26: core->h = fetch8(core); break;
+    case 0x27: daa(core); break;
     case 0x28: {
         const int8_t offset = (int8_t)fetch8(core);
         if (flag_is_set(core, FLAG_Z)) core->pc = (uint16_t)(core->pc + offset);
         break;
     }
+    case 0x29: add_hl(core, gb_core_hl(core)); break;
     case 0x2A: core->a = read8(core, gb_core_hl(core)); gb_core_set_hl(core, (uint16_t)(gb_core_hl(core) + 1)); break;
     case 0x2B: gb_core_set_hl(core, (uint16_t)(gb_core_hl(core) - 1)); break;
     case 0x2C: core->l = inc8(core, core->l); break;
@@ -387,32 +655,116 @@ void gb_core_step(gb_core_t *core)
     case 0x34: write8(core, gb_core_hl(core), inc8(core, read8(core, gb_core_hl(core)))); break;
     case 0x35: write8(core, gb_core_hl(core), dec8(core, read8(core, gb_core_hl(core)))); break;
     case 0x36: write8(core, gb_core_hl(core), fetch8(core)); break;
+    case 0x37: core->f = (core->f & FLAG_Z) | FLAG_C; break;
     case 0x38: {
         const int8_t offset = (int8_t)fetch8(core);
         if (flag_is_set(core, FLAG_C)) core->pc = (uint16_t)(core->pc + offset);
         break;
     }
+    case 0x39: add_hl(core, core->sp); break;
     case 0x3A: core->a = read8(core, gb_core_hl(core)); gb_core_set_hl(core, (uint16_t)(gb_core_hl(core) - 1)); break;
     case 0x3C: core->a = inc8(core, core->a); break;
     case 0x3D: core->a = dec8(core, core->a); break;
     case 0x3E: core->a = fetch8(core); break;
+    case 0x3F: core->f = (core->f & FLAG_Z) | (flag_is_set(core, FLAG_C) ? 0 : FLAG_C); break;
+    case 0xC0: if (!flag_is_set(core, FLAG_Z)) core->pc = pop16(core); break;
     case 0xC1: set16(&core->b, &core->c, pop16(core)); break;
+    case 0xC2: {
+        const uint16_t target = fetch16(core);
+        if (!flag_is_set(core, FLAG_Z)) core->pc = target;
+        break;
+    }
     case 0xC3: core->pc = fetch16(core); break;
+    case 0xC4: {
+        const uint16_t target = fetch16(core);
+        if (!flag_is_set(core, FLAG_Z)) {
+            push16(core, core->pc);
+            core->pc = target;
+        }
+        break;
+    }
     case 0xC5: push16(core, gb_core_bc(core)); break;
+    case 0xC6: add_a(core, fetch8(core)); break;
+    case 0xC7: push16(core, core->pc); core->pc = 0x00; break;
+    case 0xC8: if (flag_is_set(core, FLAG_Z)) core->pc = pop16(core); break;
     case 0xC9: core->pc = pop16(core); break;
+    case 0xCA: {
+        const uint16_t target = fetch16(core);
+        if (flag_is_set(core, FLAG_Z)) core->pc = target;
+        break;
+    }
+    case 0xCB: execute_cb(core); break;
+    case 0xCC: {
+        const uint16_t target = fetch16(core);
+        if (flag_is_set(core, FLAG_Z)) {
+            push16(core, core->pc);
+            core->pc = target;
+        }
+        break;
+    }
     case 0xCD: {
         const uint16_t target = fetch16(core);
         push16(core, core->pc);
         core->pc = target;
         break;
     }
+    case 0xCE: adc_a(core, fetch8(core)); break;
+    case 0xCF: push16(core, core->pc); core->pc = 0x08; break;
+    case 0xD0: if (!flag_is_set(core, FLAG_C)) core->pc = pop16(core); break;
     case 0xD1: set16(&core->d, &core->e, pop16(core)); break;
+    case 0xD2: {
+        const uint16_t target = fetch16(core);
+        if (!flag_is_set(core, FLAG_C)) core->pc = target;
+        break;
+    }
+    case 0xD4: {
+        const uint16_t target = fetch16(core);
+        if (!flag_is_set(core, FLAG_C)) {
+            push16(core, core->pc);
+            core->pc = target;
+        }
+        break;
+    }
     case 0xD5: push16(core, gb_core_de(core)); break;
+    case 0xD6: sub_a(core, fetch8(core)); break;
+    case 0xD7: push16(core, core->pc); core->pc = 0x10; break;
+    case 0xD8: if (flag_is_set(core, FLAG_C)) core->pc = pop16(core); break;
+    case 0xD9: core->pc = pop16(core); core->ime = true; break;
+    case 0xDA: {
+        const uint16_t target = fetch16(core);
+        if (flag_is_set(core, FLAG_C)) core->pc = target;
+        break;
+    }
+    case 0xDC: {
+        const uint16_t target = fetch16(core);
+        if (flag_is_set(core, FLAG_C)) {
+            push16(core, core->pc);
+            core->pc = target;
+        }
+        break;
+    }
+    case 0xDE: sbc_a(core, fetch8(core)); break;
+    case 0xDF: push16(core, core->pc); core->pc = 0x18; break;
     case 0xE0: write8(core, (uint16_t)(0xFF00 + fetch8(core)), core->a); break;
     case 0xE1: gb_core_set_hl(core, pop16(core)); break;
     case 0xE2: write8(core, (uint16_t)(0xFF00 + core->c), core->a); break;
     case 0xE5: push16(core, gb_core_hl(core)); break;
+    case 0xE6: core->a &= fetch8(core); core->f = core->a == 0 ? FLAG_Z | FLAG_H : FLAG_H; break;
+    case 0xE7: push16(core, core->pc); core->pc = 0x20; break;
+    case 0xE8: {
+        const int8_t offset = (int8_t)fetch8(core);
+        const uint16_t old_sp = core->sp;
+        core->sp = (uint16_t)(core->sp + offset);
+        set_flag(core, FLAG_Z, false);
+        set_flag(core, FLAG_N, false);
+        set_flag(core, FLAG_H, ((old_sp & 0x0F) + ((uint8_t)offset & 0x0F)) > 0x0F);
+        set_flag(core, FLAG_C, ((old_sp & 0xFF) + (uint8_t)offset) > 0xFF);
+        break;
+    }
+    case 0xE9: core->pc = gb_core_hl(core); break;
     case 0xEA: write8(core, fetch16(core), core->a); break;
+    case 0xEE: core->a ^= fetch8(core); core->f = core->a == 0 ? FLAG_Z : 0; break;
+    case 0xEF: push16(core, core->pc); core->pc = 0x28; break;
     case 0xF0: core->a = read8(core, (uint16_t)(0xFF00 + fetch8(core))); break;
     case 0xF1: {
         const uint16_t af = pop16(core);
@@ -422,10 +774,23 @@ void gb_core_step(gb_core_t *core)
     }
     case 0xF3: core->ime = false; break;
     case 0xF5: push16(core, gb_core_af(core)); break;
+    case 0xF6: core->a |= fetch8(core); core->f = core->a == 0 ? FLAG_Z : 0; break;
+    case 0xF7: push16(core, core->pc); core->pc = 0x30; break;
+    case 0xF8: {
+        const int8_t offset = (int8_t)fetch8(core);
+        const uint16_t old_sp = core->sp;
+        gb_core_set_hl(core, (uint16_t)(core->sp + offset));
+        set_flag(core, FLAG_Z, false);
+        set_flag(core, FLAG_N, false);
+        set_flag(core, FLAG_H, ((old_sp & 0x0F) + ((uint8_t)offset & 0x0F)) > 0x0F);
+        set_flag(core, FLAG_C, ((old_sp & 0xFF) + (uint8_t)offset) > 0xFF);
+        break;
+    }
     case 0xF9: core->sp = gb_core_hl(core); break;
     case 0xFA: core->a = read8(core, fetch16(core)); break;
     case 0xFB: core->ime = true; break;
     case 0xFE: cp_a(core, fetch8(core)); break;
+    case 0xFF: push16(core, core->pc); core->pc = 0x38; break;
     default:
         core->status = GB_CORE_UNSUPPORTED_OPCODE;
         core->steps++;

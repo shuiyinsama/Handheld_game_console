@@ -544,8 +544,11 @@ static void draw_gb_player(const app_state_t *app)
             snprintf(line, sizeof(line), "DE %04X HL %04X", gb_core_de(core), gb_core_hl(core));
             draw_text(58, 324, line, board_rgb565(160, 178, 190), 2);
 
-            snprintf(line, sizeof(line), "%s %u", gb_core_status_name(core->status), (unsigned int)core->steps);
+            snprintf(line, sizeof(line), "BNK %03X %s", core->rom_bank, gb_core_status_name(core->status));
             draw_text(58, 356, line, core->status == GB_CORE_UNSUPPORTED_OPCODE ? board_rgb565(236, 92, 92) : board_rgb565(130, 190, 230), 2);
+
+            snprintf(line, sizeof(line), "STP %u", (unsigned int)core->steps);
+            draw_text(58, 388, line, board_rgb565(130, 190, 230), 2);
         }
     }
 

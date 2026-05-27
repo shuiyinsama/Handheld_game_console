@@ -31,6 +31,11 @@ typedef struct {
     gb_core_status_t status;
     const uint8_t *rom;
     size_t rom_size;
+    uint8_t cartridge_type;
+    uint16_t rom_bank;
+    uint8_t ram_bank;
+    bool ram_enabled;
+    uint8_t banking_mode;
     uint8_t vram[0x2000];
     uint8_t eram[0x2000];
     uint8_t wram[0x2000];

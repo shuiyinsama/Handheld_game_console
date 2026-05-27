@@ -18,7 +18,8 @@ load the whole ROM into PSRAM and enter the `GB PLAYER` screen.
 - `KEY2`: back to menu
 - `BOOT`: open selected ROM / load from ROM info / return from GB PLAYER
 - In `GB PLAYER`: `KEY1` steps one CPU instruction, `KEY0` runs a short CPU slice,
-  `KEY2` resets CPU state.
+  `KEY2` resets CPU state. The status area shows PC, opcode, registers, ROM bank,
+  and CPU step count.
 
 # Handheld Game Console
 
