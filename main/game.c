@@ -21,6 +21,7 @@ static const char *TAG = "game";
 #define PLAYER_SPEED       6
 #define TARGET_SIZE        20
 #define SCORE_MAX          10
+#define MENU_COUNT         3
 
 typedef struct {
     int x;
@@ -41,6 +42,117 @@ typedef struct {
     uint8_t score;
     uint32_t rng;
 } game_state_t;
+
+typedef enum {
+    SCREEN_MENU = 0,
+    SCREEN_COLLECT,
+    SCREEN_INPUT_TEST,
+    SCREEN_ABOUT,
+} screen_t;
+
+typedef struct {
+    screen_t screen;
+    uint8_t selected;
+    game_state_t collect;
+} app_state_t;
+
+static const char *s_menu_items[MENU_COUNT] = {
+    "COLLECT DEMO",
+    "INPUT TEST",
+    "ABOUT",
+};
+
+static const uint8_t *glyph_rows(char ch)
+{
+    static const uint8_t space[7] = {0, 0, 0, 0, 0, 0, 0};
+    static const uint8_t a[7] = {0x0E, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+    static const uint8_t b[7] = {0x1E, 0x11, 0x11, 0x1E, 0x11, 0x11, 0x1E};
+    static const uint8_t glyph_c[7] = {0x0E, 0x11, 0x10, 0x10, 0x10, 0x11, 0x0E};
+    static const uint8_t d[7] = {0x1E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x1E};
+    static const uint8_t e[7] = {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x1F};
+    static const uint8_t f[7] = {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10};
+    static const uint8_t g[7] = {0x0E, 0x11, 0x10, 0x17, 0x11, 0x11, 0x0E};
+    static const uint8_t h[7] = {0x11, 0x11, 0x11, 0x1F, 0x11, 0x11, 0x11};
+    static const uint8_t i[7] = {0x0E, 0x04, 0x04, 0x04, 0x04, 0x04, 0x0E};
+    static const uint8_t k[7] = {0x11, 0x12, 0x14, 0x18, 0x14, 0x12, 0x11};
+    static const uint8_t l[7] = {0x10, 0x10, 0x10, 0x10, 0x10, 0x10, 0x1F};
+    static const uint8_t m[7] = {0x11, 0x1B, 0x15, 0x15, 0x11, 0x11, 0x11};
+    static const uint8_t n[7] = {0x11, 0x19, 0x15, 0x13, 0x11, 0x11, 0x11};
+    static const uint8_t o[7] = {0x0E, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+    static const uint8_t p[7] = {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10};
+    static const uint8_t r[7] = {0x1E, 0x11, 0x11, 0x1E, 0x14, 0x12, 0x11};
+    static const uint8_t s[7] = {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E};
+    static const uint8_t t[7] = {0x1F, 0x04, 0x04, 0x04, 0x04, 0x04, 0x04};
+    static const uint8_t u[7] = {0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x0E};
+    static const uint8_t v[7] = {0x11, 0x11, 0x11, 0x11, 0x11, 0x0A, 0x04};
+    static const uint8_t w[7] = {0x11, 0x11, 0x11, 0x15, 0x15, 0x1B, 0x11};
+    static const uint8_t x[7] = {0x11, 0x11, 0x0A, 0x04, 0x0A, 0x11, 0x11};
+    static const uint8_t y[7] = {0x11, 0x11, 0x0A, 0x04, 0x04, 0x04, 0x04};
+    static const uint8_t plus[7] = {0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00};
+    static const uint8_t zero[7] = {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E};
+    static const uint8_t one[7] = {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E};
+    static const uint8_t two[7] = {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F};
+    static const uint8_t three[7] = {0x1E, 0x01, 0x01, 0x0E, 0x01, 0x01, 0x1E};
+    static const uint8_t four[7] = {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02};
+    static const uint8_t five[7] = {0x1F, 0x10, 0x10, 0x1E, 0x01, 0x01, 0x1E};
+    static const uint8_t six[7] = {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E};
+    static const uint8_t seven[7] = {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08};
+    static const uint8_t eight[7] = {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E};
+    static const uint8_t nine[7] = {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C};
+
+    switch (ch) {
+    case 'A': return a;
+    case 'B': return b;
+    case 'C': return glyph_c;
+    case 'D': return d;
+    case 'E': return e;
+    case 'F': return f;
+    case 'G': return g;
+    case 'H': return h;
+    case 'I': return i;
+    case 'K': return k;
+    case 'L': return l;
+    case 'M': return m;
+    case 'N': return n;
+    case 'O': return o;
+    case 'P': return p;
+    case 'R': return r;
+    case 'S': return s;
+    case 'T': return t;
+    case 'U': return u;
+    case 'V': return v;
+    case 'W': return w;
+    case 'X': return x;
+    case 'Y': return y;
+    case '+': return plus;
+    case '0': return zero;
+    case '1': return one;
+    case '2': return two;
+    case '3': return three;
+    case '4': return four;
+    case '5': return five;
+    case '6': return six;
+    case '7': return seven;
+    case '8': return eight;
+    case '9': return nine;
+    default: return space;
+    }
+}
+
+static void draw_text(int x, int y, const char *text, uint16_t color, int scale)
+{
+    for (const char *p = text; *p; p++) {
+        const uint8_t *rows = glyph_rows(*p);
+        for (int row = 0; row < 7; row++) {
+            for (int col = 0; col < 5; col++) {
+                if (rows[row] & (1 << (4 - col))) {
+                    board_fill_rect(x + col * scale, y + row * scale, scale, scale, color);
+                }
+            }
+        }
+        x += 6 * scale;
+    }
+}
 
 static int clamp_int(int value, int min, int max)
 {
@@ -103,6 +215,21 @@ static void draw_button_slot(const board_input_t *input, size_t index)
     board_fill_rect(x + 18, y + BUTTON_TEST_BOX_H - 28, box_w - 36, 10, board_rgb565(10, 14, 18));
 }
 
+static void draw_footer_buttons(const board_input_t *input)
+{
+    const int box_w = button_test_box_w();
+    const int y = button_test_y();
+    for (int i = 0; i < BUTTON_TEST_COUNT; i++) {
+        const int x = BUTTON_TEST_MARGIN + i * (box_w + BUTTON_TEST_GAP);
+        board_fill_rect(x, y, box_w, BUTTON_TEST_BOX_H, board_rgb565(48, 56, 64));
+        board_fill_rect(x + 4, y + 4, box_w - 8, BUTTON_TEST_BOX_H - 8, board_rgb565(32, 38, 44));
+    }
+
+    for (size_t i = 0; i < BOARD_BUTTON_COUNT; i++) {
+        draw_button_slot(input, i);
+    }
+}
+
 static void draw_player(const board_input_t *input, const player_t *player)
 {
     const uint16_t body = input->pressed[BOARD_BUTTON_BOOT] ? board_rgb565(235, 220, 92) : board_rgb565(76, 170, 235);
@@ -135,6 +262,29 @@ static void draw_score(uint8_t score)
         const uint16_t color = i < score ? board_rgb565(235, 220, 92) : board_rgb565(58, 66, 74);
         board_fill_rect(x0 + i * (pip_size + gap), y0, pip_size, pip_size, color);
     }
+}
+
+static void draw_menu(const app_state_t *app)
+{
+    board_fill_screen(board_rgb565(18, 23, 30));
+    draw_text(54, 44, "HANDHELD", board_rgb565(235, 220, 92), 5);
+    draw_text(56, 94, "CONSOLE", board_rgb565(130, 190, 230), 4);
+
+    for (uint8_t i = 0; i < MENU_COUNT; i++) {
+        const int x = 88;
+        const int y = 164 + i * 72;
+        const bool selected = i == app->selected;
+        const uint16_t border = selected ? board_rgb565(235, 220, 92) : board_rgb565(68, 78, 88);
+        const uint16_t fill = selected ? board_rgb565(48, 58, 68) : board_rgb565(28, 34, 40);
+
+        board_fill_rect(x - 5, y - 5, 420, 48, border);
+        board_fill_rect(x, y, 410, 38, fill);
+        draw_text(x + 18, y + 9, s_menu_items[i], selected ? board_rgb565(255, 255, 255) : board_rgb565(158, 172, 184), 3);
+    }
+
+    draw_text(540, 360, "KEY3 UP", board_rgb565(110, 124, 136), 2);
+    draw_text(540, 384, "KEY1 DOWN", board_rgb565(110, 124, 136), 2);
+    draw_text(540, 408, "BOOT OK", board_rgb565(110, 124, 136), 2);
 }
 
 static bool update_player(const board_input_t *input, player_t *player)
@@ -172,73 +322,147 @@ static bool player_hits_target(const player_t *player, const target_t *target)
            player->y + PLAYER_SIZE > target->y;
 }
 
-static void draw_game_screen(const board_input_t *input, const game_state_t *state)
+static void draw_collect_screen(const board_input_t *input, const game_state_t *state)
 {
     board_fill_screen(board_rgb565(20, 24, 28));
 
     board_fill_rect(PLAYFIELD_X - 4, PLAYFIELD_Y - 4, PLAYFIELD_W + 8, PLAYFIELD_H + 8, board_rgb565(76, 86, 96));
     board_fill_rect(PLAYFIELD_X, PLAYFIELD_Y, PLAYFIELD_W, PLAYFIELD_H, board_rgb565(28, 34, 40));
 
-    const int box_w = button_test_box_w();
-    const int y = button_test_y();
-    for (int i = 0; i < BUTTON_TEST_COUNT; i++) {
-        const int x = BUTTON_TEST_MARGIN + i * (box_w + BUTTON_TEST_GAP);
-        board_fill_rect(x, y, box_w, BUTTON_TEST_BOX_H, board_rgb565(48, 56, 64));
-        board_fill_rect(x + 4, y + 4, box_w - 8, BUTTON_TEST_BOX_H - 8, board_rgb565(32, 38, 44));
-    }
-
-    for (size_t i = 0; i < BOARD_BUTTON_COUNT; i++) {
-        draw_button_slot(input, i);
-    }
-
     draw_score(state->score);
     draw_target(&state->target);
     draw_player(input, &state->player);
+    draw_footer_buttons(input);
+    draw_text(560, 314, "L R U D", board_rgb565(110, 124, 136), 2);
+    draw_text(560, 340, "B RESET", board_rgb565(110, 124, 136), 2);
+    draw_text(560, 366, "L+R MENU", board_rgb565(110, 124, 136), 2);
+}
+
+static void draw_input_test(const board_input_t *input)
+{
+    board_fill_screen(board_rgb565(20, 24, 28));
+    draw_text(54, 48, "INPUT TEST", board_rgb565(235, 220, 92), 4);
+    draw_footer_buttons(input);
+    draw_text(54, 144, "BOOT KEY0 KEY1 KEY2 KEY3", board_rgb565(160, 178, 190), 3);
+    draw_text(54, 210, "BOOT BACK", board_rgb565(110, 124, 136), 2);
+}
+
+static void draw_about(void)
+{
+    board_fill_screen(board_rgb565(20, 24, 28));
+    draw_text(54, 54, "ABOUT", board_rgb565(235, 220, 92), 5);
+    draw_text(58, 132, "ESP32S3", board_rgb565(130, 190, 230), 4);
+    draw_text(58, 184, "RGBLCD OK", board_rgb565(160, 178, 190), 3);
+    draw_text(58, 224, "INPUT OK", board_rgb565(160, 178, 190), 3);
+    draw_text(58, 286, "GB EMU NEXT", board_rgb565(235, 220, 92), 3);
+    draw_text(58, 374, "BOOT BACK", board_rgb565(110, 124, 136), 2);
 }
 
 void game_run(void)
 {
     board_input_t input = {0};
-    game_state_t state = {
-        .rng = 0x1234ABCD,
+    app_state_t app = {
+        .screen = SCREEN_MENU,
+        .selected = 0,
+        .collect = {.rng = 0x1234ABCD},
     };
-    reset_game(&state);
+    reset_game(&app.collect);
 
     board_input_scan(&input);
-    draw_game_screen(&input, &state);
-    ESP_LOGI(TAG, "Collect game loop started");
+    draw_menu(&app);
+    ESP_LOGI(TAG, "Menu started");
 
     while (true) {
         const bool input_changed = board_input_scan(&input);
-        if (input_changed) {
+
+        if (app.screen == SCREEN_MENU) {
+            if (input_changed) {
+                if (input.changed[BOARD_BUTTON_KEY3] && input.pressed[BOARD_BUTTON_KEY3] && app.selected > 0) {
+                    app.selected--;
+                    draw_menu(&app);
+                }
+                if (input.changed[BOARD_BUTTON_KEY1] && input.pressed[BOARD_BUTTON_KEY1] && app.selected < MENU_COUNT - 1) {
+                    app.selected++;
+                    draw_menu(&app);
+                }
+                if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
+                    if (app.selected == 0) {
+                        app.screen = SCREEN_COLLECT;
+                        reset_game(&app.collect);
+                        draw_collect_screen(&input, &app.collect);
+                    } else if (app.selected == 1) {
+                        app.screen = SCREEN_INPUT_TEST;
+                        draw_input_test(&input);
+                    } else {
+                        app.screen = SCREEN_ABOUT;
+                        draw_about();
+                    }
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(33));
+            continue;
+        }
+
+        if (app.screen == SCREEN_INPUT_TEST) {
+            if (input_changed) {
+                if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
+                    app.screen = SCREEN_MENU;
+                    draw_menu(&app);
+                } else {
+                    draw_input_test(&input);
+                }
+            }
+            vTaskDelay(pdMS_TO_TICKS(33));
+            continue;
+        }
+
+        if (app.screen == SCREEN_ABOUT) {
             if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
-                reset_game(&state);
-                draw_game_screen(&input, &state);
-                vTaskDelay(pdMS_TO_TICKS(33));
-                continue;
+                app.screen = SCREEN_MENU;
+                draw_menu(&app);
             }
-
-            for (size_t i = 0; i < BOARD_BUTTON_COUNT; i++) {
-                if (input.changed[i]) {
-                    draw_button_slot(&input, i);
-                }
-            }
+            vTaskDelay(pdMS_TO_TICKS(33));
+            continue;
         }
 
-        if (update_player(&input, &state.player)) {
-            if (player_hits_target(&state.player, &state.target)) {
-                if (state.score < SCORE_MAX) {
-                    state.score++;
+        if (app.screen == SCREEN_COLLECT) {
+            if (input_changed) {
+                if (input.pressed[BOARD_BUTTON_KEY0] && input.pressed[BOARD_BUTTON_KEY2]) {
+                    app.screen = SCREEN_MENU;
+                    draw_menu(&app);
+                    vTaskDelay(pdMS_TO_TICKS(33));
+                    continue;
                 }
-                place_target(&state);
-                draw_game_screen(&input, &state);
-            } else {
-                erase_player(&state.player);
-                draw_target(&state.target);
-                draw_player(&input, &state.player);
-            }
-        }
 
-        vTaskDelay(pdMS_TO_TICKS(33));
+                if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
+                    reset_game(&app.collect);
+                    draw_collect_screen(&input, &app.collect);
+                    vTaskDelay(pdMS_TO_TICKS(33));
+                    continue;
+                }
+
+                for (size_t i = 0; i < BOARD_BUTTON_COUNT; i++) {
+                    if (input.changed[i]) {
+                        draw_button_slot(&input, i);
+                    }
+                }
+            }
+
+            if (update_player(&input, &app.collect.player)) {
+                if (player_hits_target(&app.collect.player, &app.collect.target)) {
+                    if (app.collect.score < SCORE_MAX) {
+                        app.collect.score++;
+                    }
+                    place_target(&app.collect);
+                    draw_collect_screen(&input, &app.collect);
+                } else {
+                    erase_player(&app.collect.player);
+                    draw_target(&app.collect.target);
+                    draw_player(&input, &app.collect.player);
+                }
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(33));
+        }
     }
 }
