@@ -19,7 +19,7 @@
  */
 #define BOARD_LCD_H_RES            800
 #define BOARD_LCD_V_RES            480
-#define BOARD_LCD_PIXEL_CLOCK_HZ   (30 * 1000 * 1000)
+#define BOARD_LCD_PIXEL_CLOCK_HZ   (18 * 1000 * 1000)
 
 /* 480x272 fallback:
 #define BOARD_LCD_H_RES            480
@@ -42,6 +42,9 @@
 #define BOARD_XL9555_LCD_BL_BIT    3
 #define BOARD_LCD_BK_LIGHT_ON      1
 
+/* First input bring-up uses the onboard BOOT/K0 button. Active low. */
+#define BOARD_BUTTON_BOOT_GPIO     0
+
 /*
  * RGB565 data bus order expected by esp_lcd RGB panel:
  * B0..B4, G0..G5, R0..R4
@@ -53,10 +56,15 @@
         45, 48, 47, 21, 14       \
     }
 
-/* DE-mode timing. H/V sync pins are not connected on this board. */
-#define BOARD_LCD_HSYNC_BACK_PORCH     40
-#define BOARD_LCD_HSYNC_FRONT_PORCH    20
-#define BOARD_LCD_HSYNC_PULSE_WIDTH    1
-#define BOARD_LCD_VSYNC_BACK_PORCH     8
-#define BOARD_LCD_VSYNC_FRONT_PORCH    4
-#define BOARD_LCD_VSYNC_PULSE_WIDTH    1
+/*
+ * DE-mode timing copied from ALIENTEK's 23_rgb ESP-IDF example for the
+ * ATK-4384 / 800x480 RGBLCD module.
+ */
+#define BOARD_LCD_HSYNC_BACK_PORCH     88
+#define BOARD_LCD_HSYNC_FRONT_PORCH    40
+#define BOARD_LCD_HSYNC_PULSE_WIDTH    3
+#define BOARD_LCD_VSYNC_BACK_PORCH     32
+#define BOARD_LCD_VSYNC_FRONT_PORCH    13
+#define BOARD_LCD_VSYNC_PULSE_WIDTH    48
+
+#define BOARD_LCD_BOUNCE_BUFFER_PIXELS (480 * 10)

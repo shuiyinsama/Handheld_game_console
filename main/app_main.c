@@ -3,9 +3,9 @@
 #include <stdlib.h>
 
 #include "board_config.h"
-#include "esp_cache.h"
 #include "esp_check.h"
 #include "esp_err.h"
+#include "esp_heap_caps.h"
 #include "esp_lcd_panel_ops.h"
 #include "esp_lcd_panel_rgb.h"
 #include "esp_log.h"
@@ -21,9 +21,40 @@ static const char *TAG = "handheld";
 #define XL9555_REG_OUTPUT0     0x02
 #define XL9555_REG_CONFIG0     0x06
 
+typedef struct {
+    const char *name;
+    int gpio;
+    bool active_low;
+    bool pressed;
+    bool last_pressed;
+} handheld_button_t;
+
+static handheld_button_t s_buttons[] = {
+    {.name = "BOOT", .gpio = BOARD_BUTTON_BOOT_GPIO, .active_low = true},
+};
+
+#define BUTTON_TEST_MARGIN 48
+#define BUTTON_TEST_GAP    16
+#define BUTTON_TEST_COUNT  8
+#define BUTTON_TEST_BOX_H  92
+
 static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
     return ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3);
+}
+
+static void fill_screen(esp_lcd_panel_handle_t panel, uint16_t color);
+static void draw_boot_button(esp_lcd_panel_handle_t panel);
+
+static int button_test_box_w(void)
+{
+    return (BOARD_LCD_H_RES - BUTTON_TEST_MARGIN * 2 - BUTTON_TEST_GAP * (BUTTON_TEST_COUNT - 1)) /
+           BUTTON_TEST_COUNT;
+}
+
+static int button_test_y(void)
+{
+    return (BOARD_LCD_V_RES - BUTTON_TEST_BOX_H) / 2;
 }
 
 static esp_err_t xl9555_write_reg(uint8_t reg, uint8_t value)
@@ -61,6 +92,48 @@ static esp_err_t board_i2c_init(void)
 
     ESP_RETURN_ON_ERROR(i2c_param_config(I2C_MASTER_PORT, &i2c_config), TAG, "I2C config failed");
     return i2c_driver_install(I2C_MASTER_PORT, i2c_config.mode, 0, 0, 0);
+}
+
+static void input_init(void)
+{
+    uint64_t pin_mask = 0;
+    for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
+        if (s_buttons[i].gpio >= 0) {
+            pin_mask |= 1ULL << s_buttons[i].gpio;
+        }
+    }
+
+    gpio_config_t input_config = {
+        .pin_bit_mask = pin_mask,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&input_config));
+}
+
+static bool input_scan(void)
+{
+    bool changed = false;
+
+    for (size_t i = 0; i < sizeof(s_buttons) / sizeof(s_buttons[0]); i++) {
+        if (s_buttons[i].gpio < 0) {
+            continue;
+        }
+
+        const int level = gpio_get_level(s_buttons[i].gpio);
+        const bool pressed = s_buttons[i].active_low ? (level == 0) : (level != 0);
+        s_buttons[i].last_pressed = s_buttons[i].pressed;
+        s_buttons[i].pressed = pressed;
+
+        if (s_buttons[i].pressed != s_buttons[i].last_pressed) {
+            ESP_LOGI(TAG, "Button %s %s", s_buttons[i].name, s_buttons[i].pressed ? "pressed" : "released");
+            changed = true;
+        }
+    }
+
+    return changed;
 }
 
 static void lcd_backlight_on(void)
@@ -112,6 +185,7 @@ static esp_lcd_panel_handle_t lcd_init(void)
         .disp_gpio_num = BOARD_LCD_GPIO_DISP_EN,
         .data_gpio_nums = BOARD_LCD_DATA_GPIO_LIST,
         .flags.fb_in_psram = true,
+        .bounce_buffer_size_px = BOARD_LCD_BOUNCE_BUFFER_PIXELS,
     };
 
     esp_lcd_panel_handle_t panel = NULL;
@@ -127,148 +201,88 @@ static esp_lcd_panel_handle_t lcd_init(void)
     return panel;
 }
 
-static uint16_t *lcd_get_frame_buffer(esp_lcd_panel_handle_t panel)
+static void lcd_fill_rect(esp_lcd_panel_handle_t panel, int x0, int y0, int w, int h, uint16_t color)
 {
-    void *frame_buffer = NULL;
-    ESP_ERROR_CHECK(esp_lcd_rgb_panel_get_frame_buffer(panel, 1, &frame_buffer));
-    return (uint16_t *)frame_buffer;
-}
-
-static void draw_color_bars(uint16_t *frame)
-{
-    const uint16_t bars[] = {
-        0xFFFF,
-        rgb565(255, 255, 0),
-        rgb565(0, 255, 255),
-        rgb565(0, 255, 0),
-        rgb565(255, 0, 255),
-        rgb565(255, 0, 0),
-        rgb565(0, 0, 255),
-        0x0000,
-    };
-
-    for (int y = 0; y < BOARD_LCD_V_RES; y++) {
-        for (int x = 0; x < BOARD_LCD_H_RES; x++) {
-            frame[y * BOARD_LCD_H_RES + x] = bars[(x * 8) / BOARD_LCD_H_RES];
-        }
-    }
-}
-
-static void draw_rect(uint16_t *frame, int x0, int y0, int w, int h, uint16_t color)
-{
-    for (int y = y0; y < y0 + h; y++) {
-        if (y < 0 || y >= BOARD_LCD_V_RES) {
-            continue;
-        }
-
-        for (int x = x0; x < x0 + w; x++) {
-            if (x < 0 || x >= BOARD_LCD_H_RES) {
-                continue;
-            }
-
-            frame[y * BOARD_LCD_H_RES + x] = color;
-        }
-    }
-}
-
-static void draw_gameboy_viewport(uint16_t *frame)
-{
-    int scale = BOARD_LCD_H_RES / 160;
-    const int scale_y = BOARD_LCD_V_RES / 144;
-    if (scale > scale_y) {
-        scale = scale_y;
-    }
-    if (scale < 1) {
-        scale = 1;
+    if (w <= 0 || h <= 0) {
+        return;
     }
 
-    const int gb_w = 160 * scale;
-    const int gb_h = 144 * scale;
-    const int gb_x = (BOARD_LCD_H_RES - gb_w) / 2;
-    const int gb_y = (BOARD_LCD_V_RES - gb_h) / 2;
+    const int x1 = x0 < 0 ? 0 : x0;
+    const int y1 = y0 < 0 ? 0 : y0;
+    const int x2 = (x0 + w) > BOARD_LCD_H_RES ? BOARD_LCD_H_RES : (x0 + w);
+    const int y2 = (y0 + h) > BOARD_LCD_V_RES ? BOARD_LCD_V_RES : (y0 + h);
+    const int clipped_w = x2 - x1;
 
-    draw_rect(frame, gb_x - 4, gb_y - 4, gb_w + 8, gb_h + 8, rgb565(32, 32, 32));
-    draw_rect(frame, gb_x, gb_y, gb_w, gb_h, rgb565(155, 188, 15));
-
-    const int tile = 8 * scale;
-    for (int y = 0; y < gb_h; y += tile) {
-        for (int x = 0; x < gb_w; x += tile) {
-            if (((x + y) / tile) & 1) {
-                draw_rect(frame, gb_x + x, gb_y + y, tile, tile, rgb565(139, 172, 15));
-            }
-        }
+    if (clipped_w <= 0 || y2 <= y1) {
+        return;
     }
 
-    draw_rect(frame, gb_x + 12 * scale, gb_y + 12 * scale, gb_w - 24 * scale, 4 * scale, rgb565(15, 56, 15));
-    draw_rect(frame, gb_x + 12 * scale, gb_y + gb_h - 16 * scale, gb_w - 24 * scale, 4 * scale, rgb565(15, 56, 15));
-}
+    uint16_t *line = heap_caps_malloc(clipped_w * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    ESP_ERROR_CHECK(line ? ESP_OK : ESP_ERR_NO_MEM);
 
-static void draw_alignment_marks(uint16_t *frame)
-{
-    const int mark = 24;
-
-    draw_rect(frame, 0, 0, BOARD_LCD_H_RES, 4, 0xFFFF);
-    draw_rect(frame, 0, BOARD_LCD_V_RES - 4, BOARD_LCD_H_RES, 4, 0xFFFF);
-    draw_rect(frame, 0, 0, 4, BOARD_LCD_V_RES, 0xFFFF);
-    draw_rect(frame, BOARD_LCD_H_RES - 4, 0, 4, BOARD_LCD_V_RES, 0xFFFF);
-
-    draw_rect(frame, 0, 0, mark, mark, rgb565(255, 0, 0));
-    draw_rect(frame, BOARD_LCD_H_RES - mark, 0, mark, mark, rgb565(0, 255, 0));
-    draw_rect(frame, 0, BOARD_LCD_V_RES - mark, mark, mark, rgb565(0, 0, 255));
-    draw_rect(frame, BOARD_LCD_H_RES - mark, BOARD_LCD_V_RES - mark, mark, mark, rgb565(255, 255, 255));
-}
-
-static void fill_screen(uint16_t *frame, uint16_t color)
-{
-    for (int y = 0; y < BOARD_LCD_V_RES; y++) {
-        for (int x = 0; x < BOARD_LCD_H_RES; x++) {
-            frame[y * BOARD_LCD_H_RES + x] = color;
-        }
+    for (int x = 0; x < clipped_w; x++) {
+        line[x] = color;
     }
+
+    for (int y = y1; y < y2; y++) {
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, x1, y, x2, y + 1, line));
+    }
+
+    heap_caps_free(line);
 }
 
-static void lcd_sync_frame_buffer(uint16_t *frame)
+static void draw_button_test_screen(esp_lcd_panel_handle_t panel)
 {
-    ESP_ERROR_CHECK(esp_cache_msync(
-        frame,
-        BOARD_LCD_H_RES * BOARD_LCD_V_RES * sizeof(uint16_t),
-        ESP_CACHE_MSYNC_FLAG_DIR_C2M));
+    fill_screen(panel, rgb565(20, 24, 28));
+
+    const int box_w = button_test_box_w();
+    const int y = button_test_y();
+
+    for (int i = 0; i < BUTTON_TEST_COUNT; i++) {
+        const int x = BUTTON_TEST_MARGIN + i * (box_w + BUTTON_TEST_GAP);
+        lcd_fill_rect(panel, x, y, box_w, BUTTON_TEST_BOX_H, rgb565(48, 56, 64));
+        lcd_fill_rect(panel, x + 4, y + 4, box_w - 8, BUTTON_TEST_BOX_H - 8, rgb565(32, 38, 44));
+    }
+
+    draw_boot_button(panel);
+}
+
+static void draw_boot_button(esp_lcd_panel_handle_t panel)
+{
+    const int box_w = button_test_box_w();
+    const int y = button_test_y();
+
+    const uint16_t boot_color = s_buttons[0].pressed ? rgb565(80, 220, 120) : rgb565(82, 96, 108);
+    lcd_fill_rect(panel, BUTTON_TEST_MARGIN + 4, y + 4, box_w - 8, BUTTON_TEST_BOX_H - 8, boot_color);
+
+    /* Small fixed markers: left is BOOT/K0, remaining slots are future D-pad/A/B/Start/Select. */
+    lcd_fill_rect(panel, BUTTON_TEST_MARGIN + 18, y + 18, box_w - 36, 10, rgb565(10, 14, 18));
+    lcd_fill_rect(panel, BUTTON_TEST_MARGIN + 18, y + BUTTON_TEST_BOX_H - 28, box_w - 36, 10, rgb565(10, 14, 18));
+}
+
+static void fill_screen(esp_lcd_panel_handle_t panel, uint16_t color)
+{
+    lcd_fill_rect(panel, 0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, color);
 }
 
 void app_main(void)
 {
     ESP_LOGI(TAG, "Booting handheld LCD bring-up");
     ESP_ERROR_CHECK(board_i2c_init());
+    input_init();
     lcd_backlight_on();
 
     esp_lcd_panel_handle_t panel = lcd_init();
 
-    uint16_t *frame = lcd_get_frame_buffer(panel);
+    input_scan();
+    draw_button_test_screen(panel);
 
-    draw_color_bars(frame);
-    draw_gameboy_viewport(frame);
-    draw_alignment_marks(frame);
-    lcd_sync_frame_buffer(frame);
+    ESP_LOGI(TAG, "Button test screen drawn");
 
-    ESP_LOGI(TAG, "LCD test pattern drawn");
-
-    const struct {
-        const char *name;
-        uint16_t color;
-    } smoke_test_colors[] = {
-        {"black", rgb565(0, 0, 0)},
-        {"white", rgb565(255, 255, 255)},
-        {"red", rgb565(255, 0, 0)},
-        {"green", rgb565(0, 255, 0)},
-        {"blue", rgb565(0, 0, 255)},
-    };
-
-    int color_index = 0;
     while (true) {
-        fill_screen(frame, smoke_test_colors[color_index].color);
-        lcd_sync_frame_buffer(frame);
-        ESP_LOGI(TAG, "LCD smoke test color: %s", smoke_test_colors[color_index].name);
-        color_index = (color_index + 1) % (sizeof(smoke_test_colors) / sizeof(smoke_test_colors[0]));
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        if (input_scan()) {
+            draw_boot_button(panel);
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }

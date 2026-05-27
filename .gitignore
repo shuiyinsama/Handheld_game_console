@@ -62,6 +62,7 @@ sdkconfig
 managed_components/
 tools/web-control/*.log
 tools/gui-task.log
+video_frames/
 .gitconfig-build
 .vscode/
 __pycache__/

@@ -1,6 +1,6 @@
 param(
     [Parameter(ValueFromRemainingArguments = $true)]
-    [string[]]$IdfArgs = @("build")
+    [string[]]$IdfArgs
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +52,10 @@ $env:PATH = (($toolPaths + $basePaths) -join ";")
 
 Push-Location $ProjectRoot
 try {
+    if (-not $IdfArgs -or $IdfArgs.Count -eq 0) {
+        $IdfArgs = @("build")
+    }
+
     & (Join-Path $PythonEnv "Scripts\python.exe") (Join-Path $IdfPath "tools\idf.py") @IdfArgs
     exit $LASTEXITCODE
 } finally {
