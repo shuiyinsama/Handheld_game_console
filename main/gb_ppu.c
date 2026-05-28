@@ -58,39 +58,6 @@ static uint8_t read_tile_pixel(const gb_core_t *core, uint8_t bank, uint16_t til
     return (uint8_t)(((hi >> bit) & 1) << 1 | ((lo >> bit) & 1));
 }
 
-static uint8_t read_dmg_bg_or_window_color_id(const gb_core_t *core, uint8_t x, uint8_t y)
-{
-    const uint8_t lcdc = core->io[IO_LCDC];
-    if ((lcdc & 0x01) == 0) {
-        return 0;
-    }
-
-    const int wx = (int)core->io[IO_WX] - 7;
-    const int wy = core->io[IO_WY];
-    const bool window =
-        (lcdc & 0x20) != 0 &&
-        (int)x >= wx &&
-        (int)y >= wy &&
-        wx < GB_PPU_SCREEN_W &&
-        wy < GB_PPU_SCREEN_H;
-
-    const uint8_t map_x = window ? (uint8_t)((int)x - wx) : (uint8_t)(x + core->io[IO_SCX]);
-    const uint8_t map_y = window ? (uint8_t)((int)y - wy) : (uint8_t)(y + core->io[IO_SCY]);
-    const uint16_t map_base = window ? ((lcdc & 0x40) ? 0x1C00 : 0x1800) : ((lcdc & 0x08) ? 0x1C00 : 0x1800);
-    const uint16_t tile_map_offset = map_base + (map_y / 8) * 32 + (map_x / 8);
-    const uint8_t tile_id = core->vram[0][tile_map_offset & 0x1FFF];
-    const uint8_t tile_row = map_y & 0x07;
-
-    uint16_t tile_addr = 0;
-    if ((lcdc & 0x10) != 0) {
-        tile_addr = (uint16_t)tile_id * 16 + tile_row * 2;
-    } else {
-        tile_addr = (uint16_t)(0x1000 + (int16_t)(int8_t)tile_id * 16 + tile_row * 2);
-    }
-
-    return read_tile_pixel(core, 0, tile_addr, (uint8_t)(map_x & 0x07), 0);
-}
-
 static gb_pixel_t read_bg_or_window_pixel(const gb_core_t *core, uint8_t x, uint8_t y)
 {
     const uint8_t lcdc = core->io[IO_LCDC];
@@ -166,6 +133,7 @@ static void put_scaled_pixel3(uint16_t *frame, int frame_w, int x, int y, uint16
 static void draw_dmg_background_scaled3(const gb_core_t *core, uint16_t *frame, int frame_w, uint8_t *bg_ids)
 {
     const uint8_t bgp = core->io[IO_BGP];
+    const uint8_t lcdc = core->io[IO_LCDC];
     const uint16_t palette[4] = {
         dmg_color(map_palette(bgp, 0)),
         dmg_color(map_palette(bgp, 1)),
@@ -173,16 +141,68 @@ static void draw_dmg_background_scaled3(const gb_core_t *core, uint16_t *frame, 
         dmg_color(map_palette(bgp, 3)),
     };
 
+    if ((lcdc & 0x01) == 0) {
+        const uint16_t color = palette[0];
+        memset(bg_ids, 0, GB_PPU_SCREEN_W * GB_PPU_SCREEN_H);
+        for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
+            uint16_t *row0 = &frame[(gy * 3) * frame_w];
+            uint16_t *row1 = row0 + frame_w;
+            uint16_t *row2 = row1 + frame_w;
+            for (int px = 0; px < frame_w; px++) {
+                row0[px] = color;
+                row1[px] = color;
+                row2[px] = color;
+            }
+        }
+        return;
+    }
+
+    const uint16_t bg_map_base = (lcdc & 0x08) ? 0x1C00 : 0x1800;
+    const uint16_t win_map_base = (lcdc & 0x40) ? 0x1C00 : 0x1800;
+    const bool unsigned_tiles = (lcdc & 0x10) != 0;
+    const int wx = (int)core->io[IO_WX] - 7;
+    const int wy = core->io[IO_WY];
+    const bool window_enabled =
+        (lcdc & 0x20) != 0 &&
+        wx < GB_PPU_SCREEN_W &&
+        wy < GB_PPU_SCREEN_H;
+
     for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
         uint16_t *row0 = &frame[(gy * 3) * frame_w];
         uint16_t *row1 = row0 + frame_w;
         uint16_t *row2 = row1 + frame_w;
+        uint8_t *bg_row = &bg_ids[gy * GB_PPU_SCREEN_W];
+        const bool window_row = window_enabled && gy >= wy;
+        uint8_t lo = 0;
+        uint8_t hi = 0;
+        uint16_t last_tile_key = 0xFFFF;
 
         for (int gx = 0; gx < GB_PPU_SCREEN_W; gx++) {
-            const uint8_t color_id = read_dmg_bg_or_window_color_id(core, (uint8_t)gx, (uint8_t)gy);
+            const bool window_pixel = window_row && gx >= wx;
+            const uint8_t map_x = window_pixel ? (uint8_t)(gx - wx) : (uint8_t)(gx + core->io[IO_SCX]);
+            const uint8_t map_y = window_pixel ? (uint8_t)(gy - wy) : (uint8_t)(gy + core->io[IO_SCY]);
+            const uint16_t map_base = window_pixel ? win_map_base : bg_map_base;
+            const uint16_t tile_key = (uint16_t)(map_base + (map_y / 8) * 32 + (map_x / 8));
+
+            if (tile_key != last_tile_key) {
+                const uint8_t tile_id = core->vram[0][tile_key & 0x1FFF];
+                const uint8_t tile_row = map_y & 0x07;
+                uint16_t tile_addr = 0;
+                if (unsigned_tiles) {
+                    tile_addr = (uint16_t)tile_id * 16 + tile_row * 2;
+                } else {
+                    tile_addr = (uint16_t)(0x1000 + (int16_t)(int8_t)tile_id * 16 + tile_row * 2);
+                }
+                lo = core->vram[0][tile_addr & 0x1FFF];
+                hi = core->vram[0][(tile_addr + 1) & 0x1FFF];
+                last_tile_key = tile_key;
+            }
+
+            const uint8_t bit = 7 - (map_x & 0x07);
+            const uint8_t color_id = (uint8_t)(((hi >> bit) & 1) << 1 | ((lo >> bit) & 1));
             const uint16_t color = palette[color_id & 0x03];
             const int px = gx * 3;
-            bg_ids[gy * GB_PPU_SCREEN_W + gx] = color_id;
+            bg_row[gx] = color_id;
 
             row0[px] = color;
             row0[px + 1] = color;
@@ -339,7 +359,11 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
 
     draw_sprites(core, s_frame, frame_w, scale, bg_ids);
 
-    board_fill_rect(x - 3, y - 3, frame_w + 6, frame_h + 6, board_rgb565(92, 108, 92));
+    const uint16_t border = board_rgb565(92, 108, 92);
+    board_fill_rect(x - 3, y - 3, frame_w + 6, 3, border);
+    board_fill_rect(x - 3, y + frame_h, frame_w + 6, 3, border);
+    board_fill_rect(x - 3, y, 3, frame_h, border);
+    board_fill_rect(x + frame_w, y, 3, frame_h, border);
     board_draw_rgb565_bitmap(x, y, frame_w, frame_h, s_frame);
 }
 
