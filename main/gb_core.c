@@ -299,6 +299,7 @@ static void tick_lcd(gb_core_t *core, uint8_t cycles)
         core->lcd_counter = (uint16_t)(core->lcd_counter - 456);
         core->io[IO_LY]++;
         if (core->io[IO_LY] == 144) {
+            core->vblank_count++;
             request_interrupt(core, INT_VBLANK);
         } else if (core->io[IO_LY] > 153) {
             core->io[IO_LY] = 0;
@@ -332,6 +333,18 @@ static void gb_core_tick(gb_core_t *core, uint8_t cycles)
     tick_lcd(core, cycles);
 }
 
+static void update_ime_delay(gb_core_t *core)
+{
+    if (core->ime_enable_delay == 0) {
+        return;
+    }
+
+    core->ime_enable_delay--;
+    if (core->ime_enable_delay == 0) {
+        core->ime = true;
+    }
+}
+
 static bool service_interrupt(gb_core_t *core)
 {
     const uint8_t pending = core->ie & core->io[IO_IF] & 0x1F;
@@ -341,6 +354,7 @@ static bool service_interrupt(gb_core_t *core)
 
     if (core->status == GB_CORE_HALTED) {
         core->status = GB_CORE_RUNNING;
+        core->interrupt_wake_count++;
     }
 
     if (!core->ime) {
@@ -349,16 +363,19 @@ static bool service_interrupt(gb_core_t *core)
 
     static const uint16_t vectors[5] = {0x40, 0x48, 0x50, 0x58, 0x60};
     core->ime = false;
+    core->ime_enable_delay = 0;
     for (uint8_t i = 0; i < 5; i++) {
         const uint8_t bit = (uint8_t)(1U << i);
         if ((pending & bit) != 0) {
             core->io[IO_IF] = (core->io[IO_IF] & (uint8_t)~bit) | 0xE0;
             push16(core, core->pc);
             core->pc = vectors[i];
+            core->interrupt_service_count++;
             core->last_opcode = 0xFF;
             core->last_pc = core->pc;
             core->steps++;
             gb_core_tick(core, 20);
+            update_ime_delay(core);
             return true;
         }
     }
@@ -369,6 +386,7 @@ static void finish_instruction(gb_core_t *core, uint8_t cycles)
 {
     core->steps++;
     gb_core_tick(core, cycles);
+    update_ime_delay(core);
 }
 
 static void write16(gb_core_t *core, uint16_t addr, uint16_t value)
@@ -675,7 +693,8 @@ void gb_core_step(gb_core_t *core)
     }
 
     if (core->status == GB_CORE_HALTED || core->status == GB_CORE_STOPPED) {
-        finish_instruction(core, 4);
+        core->halt_ticks++;
+        gb_core_tick(core, 4);
         return;
     }
 
@@ -954,7 +973,7 @@ void gb_core_step(gb_core_t *core)
         break;
     }
     case 0xF2: core->a = read8(core, (uint16_t)(0xFF00 + core->c)); break;
-    case 0xF3: core->ime = false; break;
+    case 0xF3: core->ime = false; core->ime_enable_delay = 0; break;
     case 0xF5: push16(core, gb_core_af(core)); break;
     case 0xF6: core->a |= fetch8(core); core->f = core->a == 0 ? FLAG_Z : 0; break;
     case 0xF7: push16(core, core->pc); core->pc = 0x30; break;
@@ -970,7 +989,7 @@ void gb_core_step(gb_core_t *core)
     }
     case 0xF9: core->sp = gb_core_hl(core); break;
     case 0xFA: core->a = read8(core, fetch16(core)); break;
-    case 0xFB: core->ime = true; break;
+    case 0xFB: core->ime_enable_delay = 2; break;
     case 0xFE: cp_a(core, fetch8(core)); break;
     case 0xFF: push16(core, core->pc); core->pc = 0x38; break;
     default:

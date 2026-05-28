@@ -30,7 +30,7 @@ static const char *TAG = "game";
 #define GB_STATS_X         42
 #define GB_STATS_Y         166
 #define GB_STATS_W         350
-#define GB_STATS_H         226
+#define GB_STATS_H         230
 #define GB_PREVIEW_X       420
 #define GB_PREVIEW_Y       82
 
@@ -565,7 +565,7 @@ static void draw_gb_player(const app_state_t *app)
             snprintf(line, sizeof(line), "BNK %03X %s", core->rom_bank, gb_core_status_name(core->status));
             draw_text(42, 262, line, core->status == GB_CORE_UNSUPPORTED_OPCODE ? board_rgb565(236, 92, 92) : board_rgb565(130, 190, 230), 2);
 
-            snprintf(line, sizeof(line), "STP %u", (unsigned int)core->steps);
+            snprintf(line, sizeof(line), "INS %u HLT %u", (unsigned int)core->steps, (unsigned int)core->halt_ticks);
             draw_text(42, 294, line, board_rgb565(130, 190, 230), 2);
 
             snprintf(line, sizeof(line), "LY %03u CY %u", core->io[0x44], (unsigned int)core->cycles);
@@ -573,6 +573,8 @@ static void draw_gb_player(const app_state_t *app)
 
             snprintf(line, sizeof(line), "LCD %02X BG %u/%u", ppu_stats.lcdc, ppu_stats.tile_data_nonzero, ppu_stats.bg_map_nonzero);
             draw_text(42, 358, line, board_rgb565(110, 124, 136), 2);
+            snprintf(line, sizeof(line), "IE %02X IF %02X IME %u V%u", core->ie & 0x1F, core->io[0x0F] & 0x1F, core->ime ? 1 : 0, (unsigned int)core->vblank_count);
+            draw_text(42, 382, line, board_rgb565(110, 124, 136), 2);
             gb_ppu_draw_preview(core, 420, 82);
         } else {
             draw_gb_logo_preview(rom->data);
@@ -621,7 +623,7 @@ static void draw_gb_player_dynamic(const app_state_t *app)
         core->status == GB_CORE_UNSUPPORTED_OPCODE ? board_rgb565(236, 92, 92) : board_rgb565(130, 190, 230),
         2);
 
-    snprintf(line, sizeof(line), "STP %u", (unsigned int)core->steps);
+    snprintf(line, sizeof(line), "INS %u HLT %u", (unsigned int)core->steps, (unsigned int)core->halt_ticks);
     draw_text(GB_STATS_X, GB_STATS_Y + 128, line, board_rgb565(130, 190, 230), 2);
 
     snprintf(line, sizeof(line), "LY %03u CY %u", core->io[0x44], (unsigned int)core->cycles);
@@ -629,6 +631,9 @@ static void draw_gb_player_dynamic(const app_state_t *app)
 
     snprintf(line, sizeof(line), "LCD %02X BG %u/%u", ppu_stats.lcdc, ppu_stats.tile_data_nonzero, ppu_stats.bg_map_nonzero);
     draw_text(GB_STATS_X, GB_STATS_Y + 192, line, board_rgb565(110, 124, 136), 2);
+
+    snprintf(line, sizeof(line), "IE %02X IF %02X IME %u V%u", core->ie & 0x1F, core->io[0x0F] & 0x1F, core->ime ? 1 : 0, (unsigned int)core->vblank_count);
+    draw_text(GB_STATS_X, GB_STATS_Y + 216, line, board_rgb565(110, 124, 136), 2);
 
     board_fill_rect(42, 396, 458, 18, board_rgb565(20, 24, 28));
     draw_text(42, 396, app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET" : "KEY0 AUTO KEY1 STEP KEY2 RESET", board_rgb565(110, 124, 136), 2);

@@ -24,6 +24,7 @@ typedef struct {
     uint16_t sp;
     uint16_t pc;
     bool ime;
+    uint8_t ime_enable_delay;
     uint8_t ie;
     uint32_t cycles;
     uint16_t div_counter;
@@ -32,6 +33,10 @@ typedef struct {
     uint8_t last_opcode;
     uint16_t last_pc;
     uint32_t steps;
+    uint32_t halt_ticks;
+    uint32_t vblank_count;
+    uint32_t interrupt_wake_count;
+    uint32_t interrupt_service_count;
     gb_core_status_t status;
     const uint8_t *rom;
     size_t rom_size;
