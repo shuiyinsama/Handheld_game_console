@@ -24,4 +24,8 @@ esp_err_t board_init(void);
 bool board_input_scan(board_input_t *input);
 void board_fill_screen(uint16_t color);
 void board_fill_rect(int x0, int y0, int w, int h, uint16_t color);
+void board_draw_rgb565_bitmap(int x0, int y0, int w, int h, const uint16_t *pixels);
+void board_begin_frame(void);
+void board_end_frame(void);
+void board_present(void);
 uint16_t board_rgb565(uint8_t r, uint8_t g, uint8_t b);

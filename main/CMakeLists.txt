@@ -4,6 +4,7 @@ idf_component_register(
         "board.c"
         "gb_core.c"
         "gb_player.c"
+        "gb_ppu.c"
         "game.c"
         "storage.c"
     INCLUDE_DIRS

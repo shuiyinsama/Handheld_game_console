@@ -10,6 +10,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <string.h>
 
 static const char *TAG = "board";
 
@@ -37,6 +38,13 @@ static button_hw_t s_buttons[BOARD_BUTTON_COUNT] = {
 };
 
 static esp_lcd_panel_handle_t s_panel;
+static uint16_t *s_frame_buffers[2];
+static uint8_t s_back_buffer_index;
+static uint8_t s_batch_depth;
+static bool s_frame_dirty;
+static volatile bool s_frame_done;
+
+void board_present(void);
 
 uint16_t board_rgb565(uint8_t r, uint8_t g, uint8_t b)
 {
@@ -152,10 +160,20 @@ static esp_err_t lcd_backlight_on(void)
     return xl9555_write_reg(config_reg, config);
 }
 
+static bool lcd_frame_done_callback(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t *edata, void *user_ctx)
+{
+    (void)panel;
+    (void)edata;
+    (void)user_ctx;
+    s_frame_done = true;
+    return false;
+}
+
 static esp_err_t lcd_init(void)
 {
     esp_lcd_rgb_panel_config_t panel_config = {
         .clk_src = LCD_CLK_SRC_PLL160M,
+        .num_fbs = 2,
         .timings = {
             .pclk_hz = BOARD_LCD_PIXEL_CLOCK_HZ,
             .h_res = BOARD_LCD_H_RES,
@@ -183,6 +201,25 @@ static esp_err_t lcd_init(void)
     ESP_RETURN_ON_ERROR(esp_lcd_new_rgb_panel(&panel_config, &s_panel), TAG, "RGB panel create failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_reset(s_panel), TAG, "RGB panel reset failed");
     ESP_RETURN_ON_ERROR(esp_lcd_panel_init(s_panel), TAG, "RGB panel init failed");
+    void *frame_buffer0 = NULL;
+    void *frame_buffer1 = NULL;
+    ESP_RETURN_ON_ERROR(
+        esp_lcd_rgb_panel_get_frame_buffer(s_panel, 2, &frame_buffer0, &frame_buffer1),
+        TAG,
+        "RGB frame buffer get failed");
+    s_frame_buffers[0] = frame_buffer0;
+    s_frame_buffers[1] = frame_buffer1;
+
+    const esp_lcd_rgb_panel_event_callbacks_t callbacks = {
+        .on_frame_buf_complete = lcd_frame_done_callback,
+    };
+    ESP_RETURN_ON_ERROR(
+        esp_lcd_rgb_panel_register_event_callbacks(s_panel, &callbacks, NULL),
+        TAG,
+        "RGB callback register failed");
+
+    memset(s_frame_buffers[0], 0, BOARD_LCD_H_RES * BOARD_LCD_V_RES * sizeof(uint16_t));
+    memset(s_frame_buffers[1], 0, BOARD_LCD_H_RES * BOARD_LCD_V_RES * sizeof(uint16_t));
 
     esp_err_t disp_ret = esp_lcd_panel_disp_on_off(s_panel, true);
     if (disp_ret != ESP_OK && disp_ret != ESP_ERR_NOT_SUPPORTED) {
@@ -190,6 +227,19 @@ static esp_err_t lcd_init(void)
     }
 
     return ESP_OK;
+}
+
+static uint16_t *back_buffer(void)
+{
+    return s_frame_buffers[s_back_buffer_index];
+}
+
+static void mark_dirty(void)
+{
+    s_frame_dirty = true;
+    if (s_batch_depth == 0) {
+        board_present();
+    }
 }
 
 esp_err_t board_init(void)
@@ -255,21 +305,82 @@ void board_fill_rect(int x0, int y0, int w, int h, uint16_t color)
         return;
     }
 
-    uint16_t *line = heap_caps_malloc(clipped_w * sizeof(uint16_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    ESP_ERROR_CHECK(line ? ESP_OK : ESP_ERR_NO_MEM);
-
-    for (int x = 0; x < clipped_w; x++) {
-        line[x] = color;
-    }
-
+    uint16_t *canvas = back_buffer();
     for (int y = y1; y < y2; y++) {
-        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, x1, y, x2, y + 1, line));
+        uint16_t *row = &canvas[y * BOARD_LCD_H_RES + x1];
+        for (int x = 0; x < clipped_w; x++) {
+            row[x] = color;
+        }
     }
-
-    heap_caps_free(line);
+    mark_dirty();
 }
 
 void board_fill_screen(uint16_t color)
 {
-    board_fill_rect(0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, color);
+    uint16_t *canvas = back_buffer();
+    for (size_t i = 0; i < BOARD_LCD_H_RES * BOARD_LCD_V_RES; i++) {
+        canvas[i] = color;
+    }
+    mark_dirty();
+}
+
+void board_draw_rgb565_bitmap(int x0, int y0, int w, int h, const uint16_t *pixels)
+{
+    if (w <= 0 || h <= 0 || pixels == NULL) {
+        return;
+    }
+
+    const int x1 = x0 < 0 ? 0 : x0;
+    const int y1 = y0 < 0 ? 0 : y0;
+    const int x2 = (x0 + w) > BOARD_LCD_H_RES ? BOARD_LCD_H_RES : (x0 + w);
+    const int y2 = (y0 + h) > BOARD_LCD_V_RES ? BOARD_LCD_V_RES : (y0 + h);
+    const int clipped_w = x2 - x1;
+
+    if (clipped_w <= 0 || y2 <= y1) {
+        return;
+    }
+
+    uint16_t *canvas = back_buffer();
+    for (int y = y1; y < y2; y++) {
+        const int src_y = y - y0;
+        const int src_x = x1 - x0;
+        memcpy(&canvas[y * BOARD_LCD_H_RES + x1], &pixels[src_y * w + src_x], clipped_w * sizeof(uint16_t));
+    }
+    mark_dirty();
+}
+
+void board_begin_frame(void)
+{
+    s_batch_depth++;
+}
+
+void board_end_frame(void)
+{
+    if (s_batch_depth == 0) {
+        return;
+    }
+    s_batch_depth--;
+    if (s_batch_depth == 0) {
+        board_present();
+    }
+}
+
+void board_present(void)
+{
+    if (!s_frame_dirty || s_panel == NULL || s_frame_buffers[0] == NULL || s_frame_buffers[1] == NULL) {
+        return;
+    }
+
+    uint16_t *front = back_buffer();
+    s_frame_done = false;
+    ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, front));
+
+    const TickType_t start = xTaskGetTickCount();
+    while (!s_frame_done && (xTaskGetTickCount() - start) < pdMS_TO_TICKS(100)) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    s_back_buffer_index ^= 1;
+    memcpy(back_buffer(), front, BOARD_LCD_H_RES * BOARD_LCD_V_RES * sizeof(uint16_t));
+    s_frame_dirty = false;
 }

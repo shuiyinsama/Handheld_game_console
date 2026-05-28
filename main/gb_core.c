@@ -843,6 +843,7 @@ void gb_core_step(gb_core_t *core)
     }
     case 0x39: add_hl(core, core->sp); break;
     case 0x3A: core->a = read8(core, gb_core_hl(core)); gb_core_set_hl(core, (uint16_t)(gb_core_hl(core) - 1)); break;
+    case 0x3B: core->sp--; break;
     case 0x3C: core->a = inc8(core, core->a); break;
     case 0x3D: core->a = dec8(core, core->a); break;
     case 0x3E: core->a = fetch8(core); break;
@@ -952,6 +953,7 @@ void gb_core_step(gb_core_t *core)
         core->f = (uint8_t)(af & 0xF0);
         break;
     }
+    case 0xF2: core->a = read8(core, (uint16_t)(0xFF00 + core->c)); break;
     case 0xF3: core->ime = false; break;
     case 0xF5: push16(core, gb_core_af(core)); break;
     case 0xF6: core->a |= fetch8(core); core->f = core->a == 0 ? FLAG_Z : 0; break;

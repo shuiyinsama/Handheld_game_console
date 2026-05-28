@@ -6,6 +6,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gb_player.h"
+#include "gb_ppu.h"
 #include "storage.h"
 #include <stdio.h>
 
@@ -26,6 +27,12 @@ static const char *TAG = "game";
 #define SCORE_MAX          10
 #define MENU_COUNT         4
 #define ROM_LIST_MAX       8
+#define GB_STATS_X         42
+#define GB_STATS_Y         166
+#define GB_STATS_W         350
+#define GB_STATS_H         226
+#define GB_PREVIEW_X       420
+#define GB_PREVIEW_Y       82
 
 typedef struct {
     int x;
@@ -67,6 +74,7 @@ typedef struct {
     esp_err_t rom_info_status;
     gb_player_t gb_player;
     esp_err_t gb_load_status;
+    bool gb_autorun;
     char rom_names[ROM_LIST_MAX][STORAGE_ROM_NAME_MAX];
     game_state_t collect;
 } app_state_t;
@@ -297,6 +305,7 @@ static void draw_score(uint8_t score)
 
 static void draw_menu(const app_state_t *app)
 {
+    board_begin_frame();
     board_fill_screen(board_rgb565(18, 23, 30));
     draw_text(54, 44, "HANDHELD", board_rgb565(235, 220, 92), 5);
     draw_text(56, 94, "CONSOLE", board_rgb565(130, 190, 230), 4);
@@ -316,6 +325,7 @@ static void draw_menu(const app_state_t *app)
     draw_text(540, 360, "KEY3 UP", board_rgb565(110, 124, 136), 2);
     draw_text(540, 384, "KEY1 DOWN", board_rgb565(110, 124, 136), 2);
     draw_text(540, 408, "BOOT OK", board_rgb565(110, 124, 136), 2);
+    board_end_frame();
 }
 
 static void refresh_rom_list(app_state_t *app)
@@ -431,6 +441,7 @@ static void draw_gb_logo_preview(const uint8_t *rom)
 
 static void draw_rom_browser(const app_state_t *app)
 {
+    board_begin_frame();
     board_fill_screen(board_rgb565(18, 23, 30));
     draw_text(54, 42, "ROM BROWSER", board_rgb565(235, 220, 92), 4);
 
@@ -455,6 +466,7 @@ static void draw_rom_browser(const app_state_t *app)
     draw_text(560, 354, "BOOT OPEN", board_rgb565(110, 124, 136), 2);
     draw_text(560, 380, "KEY2 BACK", board_rgb565(110, 124, 136), 2);
     draw_text(560, 406, "KEY0 REFRESH", board_rgb565(110, 124, 136), 2);
+    board_end_frame();
 }
 
 static void open_selected_rom(app_state_t *app)
@@ -470,6 +482,7 @@ static void draw_rom_info(const app_state_t *app)
 {
     char line[48] = {0};
 
+    board_begin_frame();
     board_fill_screen(board_rgb565(18, 23, 30));
     draw_text(54, 42, "ROM INFO", board_rgb565(235, 220, 92), 4);
 
@@ -503,6 +516,7 @@ static void draw_rom_info(const app_state_t *app)
 
     draw_text(536, 380, "BOOT LOAD", board_rgb565(110, 124, 136), 2);
     draw_text(536, 406, "KEY2 BACK", board_rgb565(110, 124, 136), 2);
+    board_end_frame();
 }
 
 static void load_selected_rom(app_state_t *app)
@@ -511,6 +525,7 @@ static void load_selected_rom(app_state_t *app)
         return;
     }
     app->gb_load_status = gb_player_load(&app->gb_player, app->rom_names[app->rom_selected]);
+    app->gb_autorun = false;
     app->screen = SCREEN_GB_PLAYER;
 }
 
@@ -518,6 +533,7 @@ static void draw_gb_player(const app_state_t *app)
 {
     char line[48] = {0};
 
+    board_begin_frame();
     board_fill_screen(board_rgb565(20, 24, 28));
     draw_text(54, 42, "GB PLAYER", board_rgb565(235, 220, 92), 4);
 
@@ -528,37 +544,96 @@ static void draw_gb_player(const app_state_t *app)
     } else {
         const storage_loaded_rom_t *rom = &app->gb_player.rom;
         const gb_core_t *core = gb_player_core(&app->gb_player);
-        draw_text(58, 96, rom->info.title, board_rgb565(255, 255, 255), 3);
-        draw_gb_logo_preview(rom->data);
+        draw_text(42, 92, rom->info.title, board_rgb565(255, 255, 255), 2);
 
         snprintf(line, sizeof(line), "LOADED %u KB", (unsigned int)(rom->size / 1024));
-        draw_text(58, 224, line, board_rgb565(80, 220, 120), 2);
+        draw_text(42, 126, line, board_rgb565(80, 220, 120), 2);
 
         if (core != NULL) {
+            gb_ppu_stats_t ppu_stats = {0};
+            gb_ppu_get_stats(core, &ppu_stats);
+
             snprintf(line, sizeof(line), "PC %04X OP %02X", core->pc, core->last_opcode);
-            draw_text(58, 260, line, board_rgb565(235, 220, 92), 2);
+            draw_text(42, 166, line, board_rgb565(235, 220, 92), 2);
 
             snprintf(line, sizeof(line), "AF %04X BC %04X", gb_core_af(core), gb_core_bc(core));
-            draw_text(58, 292, line, board_rgb565(160, 178, 190), 2);
+            draw_text(42, 198, line, board_rgb565(160, 178, 190), 2);
 
             snprintf(line, sizeof(line), "DE %04X HL %04X", gb_core_de(core), gb_core_hl(core));
-            draw_text(58, 324, line, board_rgb565(160, 178, 190), 2);
+            draw_text(42, 230, line, board_rgb565(160, 178, 190), 2);
 
             snprintf(line, sizeof(line), "BNK %03X %s", core->rom_bank, gb_core_status_name(core->status));
-            draw_text(58, 356, line, core->status == GB_CORE_UNSUPPORTED_OPCODE ? board_rgb565(236, 92, 92) : board_rgb565(130, 190, 230), 2);
+            draw_text(42, 262, line, core->status == GB_CORE_UNSUPPORTED_OPCODE ? board_rgb565(236, 92, 92) : board_rgb565(130, 190, 230), 2);
 
             snprintf(line, sizeof(line), "STP %u", (unsigned int)core->steps);
-            draw_text(58, 388, line, board_rgb565(130, 190, 230), 2);
+            draw_text(42, 294, line, board_rgb565(130, 190, 230), 2);
 
             snprintf(line, sizeof(line), "LY %03u CY %u", core->io[0x44], (unsigned int)core->cycles);
-            draw_text(320, 388, line, board_rgb565(130, 190, 230), 2);
+            draw_text(42, 326, line, board_rgb565(130, 190, 230), 2);
+
+            snprintf(line, sizeof(line), "LCD %02X BG %u/%u", ppu_stats.lcdc, ppu_stats.tile_data_nonzero, ppu_stats.bg_map_nonzero);
+            draw_text(42, 358, line, board_rgb565(110, 124, 136), 2);
+            gb_ppu_draw_preview(core, 420, 82);
+        } else {
+            draw_gb_logo_preview(rom->data);
         }
     }
 
-    draw_text(520, 328, "KEY0 RUN", board_rgb565(110, 124, 136), 2);
-    draw_text(520, 354, "KEY1 STEP", board_rgb565(110, 124, 136), 2);
-    draw_text(520, 380, "KEY2 RESET", board_rgb565(110, 124, 136), 2);
-    draw_text(520, 406, "BOOT BACK", board_rgb565(110, 124, 136), 2);
+    draw_text(42, 396, app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET" : "KEY0 AUTO KEY1 STEP KEY2 RESET", board_rgb565(110, 124, 136), 2);
+    draw_text(520, 396, "BOOT BACK", board_rgb565(110, 124, 136), 2);
+    board_end_frame();
+}
+
+static void draw_gb_player_dynamic(const app_state_t *app)
+{
+    if (app->gb_load_status != ESP_OK || !gb_player_has_rom(&app->gb_player)) {
+        draw_gb_player(app);
+        return;
+    }
+
+    const gb_core_t *core = gb_player_core(&app->gb_player);
+    if (core == NULL) {
+        draw_gb_player(app);
+        return;
+    }
+
+    char line[48] = {0};
+    gb_ppu_stats_t ppu_stats = {0};
+    gb_ppu_get_stats(core, &ppu_stats);
+
+    board_begin_frame();
+    board_fill_rect(GB_STATS_X - 2, GB_STATS_Y - 2, GB_STATS_W, GB_STATS_H, board_rgb565(20, 24, 28));
+
+    snprintf(line, sizeof(line), "PC %04X OP %02X", core->pc, core->last_opcode);
+    draw_text(GB_STATS_X, GB_STATS_Y, line, board_rgb565(235, 220, 92), 2);
+
+    snprintf(line, sizeof(line), "AF %04X BC %04X", gb_core_af(core), gb_core_bc(core));
+    draw_text(GB_STATS_X, GB_STATS_Y + 32, line, board_rgb565(160, 178, 190), 2);
+
+    snprintf(line, sizeof(line), "DE %04X HL %04X", gb_core_de(core), gb_core_hl(core));
+    draw_text(GB_STATS_X, GB_STATS_Y + 64, line, board_rgb565(160, 178, 190), 2);
+
+    snprintf(line, sizeof(line), "BNK %03X %s", core->rom_bank, gb_core_status_name(core->status));
+    draw_text(
+        GB_STATS_X,
+        GB_STATS_Y + 96,
+        line,
+        core->status == GB_CORE_UNSUPPORTED_OPCODE ? board_rgb565(236, 92, 92) : board_rgb565(130, 190, 230),
+        2);
+
+    snprintf(line, sizeof(line), "STP %u", (unsigned int)core->steps);
+    draw_text(GB_STATS_X, GB_STATS_Y + 128, line, board_rgb565(130, 190, 230), 2);
+
+    snprintf(line, sizeof(line), "LY %03u CY %u", core->io[0x44], (unsigned int)core->cycles);
+    draw_text(GB_STATS_X, GB_STATS_Y + 160, line, board_rgb565(130, 190, 230), 2);
+
+    snprintf(line, sizeof(line), "LCD %02X BG %u/%u", ppu_stats.lcdc, ppu_stats.tile_data_nonzero, ppu_stats.bg_map_nonzero);
+    draw_text(GB_STATS_X, GB_STATS_Y + 192, line, board_rgb565(110, 124, 136), 2);
+
+    board_fill_rect(42, 396, 458, 18, board_rgb565(20, 24, 28));
+    draw_text(42, 396, app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET" : "KEY0 AUTO KEY1 STEP KEY2 RESET", board_rgb565(110, 124, 136), 2);
+    gb_ppu_draw_preview(core, GB_PREVIEW_X, GB_PREVIEW_Y);
+    board_end_frame();
 }
 
 static bool update_player(const board_input_t *input, player_t *player)
@@ -598,6 +673,7 @@ static bool player_hits_target(const player_t *player, const target_t *target)
 
 static void draw_collect_screen(const board_input_t *input, const game_state_t *state)
 {
+    board_begin_frame();
     board_fill_screen(board_rgb565(20, 24, 28));
 
     board_fill_rect(PLAYFIELD_X - 4, PLAYFIELD_Y - 4, PLAYFIELD_W + 8, PLAYFIELD_H + 8, board_rgb565(76, 86, 96));
@@ -610,19 +686,23 @@ static void draw_collect_screen(const board_input_t *input, const game_state_t *
     draw_text(560, 314, "L R U D", board_rgb565(110, 124, 136), 2);
     draw_text(560, 340, "B RESET", board_rgb565(110, 124, 136), 2);
     draw_text(560, 366, "L+R MENU", board_rgb565(110, 124, 136), 2);
+    board_end_frame();
 }
 
 static void draw_input_test(const board_input_t *input)
 {
+    board_begin_frame();
     board_fill_screen(board_rgb565(20, 24, 28));
     draw_text(54, 48, "INPUT TEST", board_rgb565(235, 220, 92), 4);
     draw_footer_buttons(input);
     draw_text(54, 144, "BOOT KEY0 KEY1 KEY2 KEY3", board_rgb565(160, 178, 190), 3);
     draw_text(54, 210, "BOOT BACK", board_rgb565(110, 124, 136), 2);
+    board_end_frame();
 }
 
 static void draw_about(void)
 {
+    board_begin_frame();
     board_fill_screen(board_rgb565(20, 24, 28));
     draw_text(54, 54, "ABOUT", board_rgb565(235, 220, 92), 5);
     draw_text(58, 132, "ESP32S3", board_rgb565(130, 190, 230), 4);
@@ -630,6 +710,7 @@ static void draw_about(void)
     draw_text(58, 224, "INPUT OK", board_rgb565(160, 178, 190), 3);
     draw_text(58, 286, "GB EMU NEXT", board_rgb565(235, 220, 92), 3);
     draw_text(58, 374, "BOOT BACK", board_rgb565(110, 124, 136), 2);
+    board_end_frame();
 }
 
 void game_run(void)
@@ -722,18 +803,25 @@ void game_run(void)
 
         if (app.screen == SCREEN_GB_PLAYER) {
             if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
+                app.gb_autorun = false;
                 gb_player_unload(&app.gb_player);
                 app.screen = SCREEN_ROM_INFO;
                 draw_rom_info(&app);
             } else if (input.changed[BOARD_BUTTON_KEY0] && input.pressed[BOARD_BUTTON_KEY0]) {
-                gb_player_run_steps(&app.gb_player, 512);
-                draw_gb_player(&app);
+                app.gb_autorun = !app.gb_autorun;
+                draw_gb_player_dynamic(&app);
             } else if (input.changed[BOARD_BUTTON_KEY1] && input.pressed[BOARD_BUTTON_KEY1]) {
                 gb_player_step(&app.gb_player);
-                draw_gb_player(&app);
+                draw_gb_player_dynamic(&app);
             } else if (input.changed[BOARD_BUTTON_KEY2] && input.pressed[BOARD_BUTTON_KEY2]) {
+                app.gb_autorun = false;
                 app.gb_load_status = gb_player_reset_core(&app.gb_player);
-                draw_gb_player(&app);
+                draw_gb_player_dynamic(&app);
+            }
+
+            if (app.screen == SCREEN_GB_PLAYER && app.gb_autorun) {
+                gb_player_run_steps(&app.gb_player, 4096);
+                draw_gb_player_dynamic(&app);
             }
             vTaskDelay(pdMS_TO_TICKS(33));
             continue;
