@@ -10,6 +10,7 @@
 #define INT_VBLANK 0x01
 #define INT_LCD    0x02
 #define INT_TIMER  0x04
+#define INT_JOYPAD 0x10
 
 #define IO_JOYP 0x00
 #define IO_DIV  0x04
@@ -59,6 +60,22 @@ static void gb_core_set_hl(gb_core_t *core, uint16_t value)
 }
 
 static void push16(gb_core_t *core, uint16_t value);
+static void request_interrupt(gb_core_t *core, uint8_t interrupt);
+
+static uint8_t read_joyp(const gb_core_t *core)
+{
+    const uint8_t select = core->io[IO_JOYP] & 0x30;
+    uint8_t lower = 0x0F;
+
+    if ((select & 0x10) == 0) {
+        lower &= (uint8_t)~(core->joypad_buttons & 0x0F);
+    }
+    if ((select & 0x20) == 0) {
+        lower &= (uint8_t)~((core->joypad_buttons >> 4) & 0x0F);
+    }
+
+    return (uint8_t)(0xC0 | select | lower);
+}
 
 static size_t rom_bank_count(const gb_core_t *core)
 {
@@ -117,7 +134,7 @@ static uint8_t read8(const gb_core_t *core, uint16_t addr)
     }
     if (addr < 0xFF80) {
         if (addr == 0xFF00) {
-            return 0xCF;
+            return read_joyp(core);
         }
         if (addr == 0xFF0F) {
             return core->io[IO_IF] | 0xE0;
@@ -218,6 +235,10 @@ static void write8(gb_core_t *core, uint16_t addr, uint8_t value)
         }
         if (reg == IO_IF) {
             core->io[IO_IF] = value | 0xE0;
+            return;
+        }
+        if (reg == IO_JOYP) {
+            core->io[IO_JOYP] = (uint8_t)(0xC0 | (value & 0x30) | 0x0F);
             return;
         }
         core->io[reg] = value;
@@ -680,6 +701,20 @@ void gb_core_init(gb_core_t *core, const uint8_t *rom, size_t rom_size)
     core->io[IO_LY] = 0x00;
     core->io[IO_LYC] = 0x00;
     core->status = GB_CORE_READY;
+}
+
+void gb_core_set_buttons(gb_core_t *core, uint8_t buttons)
+{
+    if (core == NULL) {
+        return;
+    }
+
+    const uint8_t previous = core->joypad_buttons;
+    core->joypad_buttons = buttons;
+
+    if ((buttons & (uint8_t)~previous) != 0) {
+        request_interrupt(core, INT_JOYPAD);
+    }
 }
 
 void gb_core_step(gb_core_t *core)

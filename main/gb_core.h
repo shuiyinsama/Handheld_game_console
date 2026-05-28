@@ -12,6 +12,17 @@ typedef enum {
     GB_CORE_UNSUPPORTED_OPCODE,
 } gb_core_status_t;
 
+typedef enum {
+    GB_BUTTON_RIGHT  = 1 << 0,
+    GB_BUTTON_LEFT   = 1 << 1,
+    GB_BUTTON_UP     = 1 << 2,
+    GB_BUTTON_DOWN   = 1 << 3,
+    GB_BUTTON_A      = 1 << 4,
+    GB_BUTTON_B      = 1 << 5,
+    GB_BUTTON_SELECT = 1 << 6,
+    GB_BUTTON_START  = 1 << 7,
+} gb_button_t;
+
 typedef struct {
     uint8_t a;
     uint8_t f;
@@ -37,6 +48,7 @@ typedef struct {
     uint32_t vblank_count;
     uint32_t interrupt_wake_count;
     uint32_t interrupt_service_count;
+    uint8_t joypad_buttons;
     gb_core_status_t status;
     const uint8_t *rom;
     size_t rom_size;
@@ -56,6 +68,7 @@ typedef struct {
 void gb_core_init(gb_core_t *core, const uint8_t *rom, size_t rom_size);
 void gb_core_step(gb_core_t *core);
 void gb_core_run(gb_core_t *core, uint32_t max_steps);
+void gb_core_set_buttons(gb_core_t *core, uint8_t buttons);
 uint16_t gb_core_af(const gb_core_t *core);
 uint16_t gb_core_bc(const gb_core_t *core);
 uint16_t gb_core_de(const gb_core_t *core);

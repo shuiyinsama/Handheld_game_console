@@ -17,3 +17,4 @@ const gb_core_t *gb_player_core(const gb_player_t *player);
 esp_err_t gb_player_reset_core(gb_player_t *player);
 void gb_player_step(gb_player_t *player);
 void gb_player_run_steps(gb_player_t *player, uint32_t steps);
+void gb_player_set_buttons(gb_player_t *player, uint8_t buttons);

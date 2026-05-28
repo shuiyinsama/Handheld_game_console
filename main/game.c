@@ -75,6 +75,7 @@ typedef struct {
     gb_player_t gb_player;
     esp_err_t gb_load_status;
     bool gb_autorun;
+    bool gb_play_mode;
     char rom_names[ROM_LIST_MAX][STORAGE_ROM_NAME_MAX];
     game_state_t collect;
 } app_state_t;
@@ -410,6 +411,29 @@ static const char *gb_core_status_name(gb_core_status_t status)
     }
 }
 
+static uint8_t gb_buttons_from_input(const board_input_t *input)
+{
+    uint8_t buttons = 0;
+
+    if (input->pressed[BOARD_BUTTON_KEY0]) {
+        buttons |= GB_BUTTON_RIGHT;
+    }
+    if (input->pressed[BOARD_BUTTON_KEY2]) {
+        buttons |= GB_BUTTON_LEFT;
+    }
+    if (input->pressed[BOARD_BUTTON_KEY3]) {
+        buttons |= GB_BUTTON_UP;
+    }
+    if (input->pressed[BOARD_BUTTON_KEY1]) {
+        buttons |= GB_BUTTON_DOWN;
+    }
+    if (input->pressed[BOARD_BUTTON_BOOT]) {
+        buttons |= GB_BUTTON_A;
+    }
+
+    return buttons;
+}
+
 static void draw_gb_logo_preview(const uint8_t *rom)
 {
     const int scale = 4;
@@ -526,6 +550,7 @@ static void load_selected_rom(app_state_t *app)
     }
     app->gb_load_status = gb_player_load(&app->gb_player, app->rom_names[app->rom_selected]);
     app->gb_autorun = false;
+    app->gb_play_mode = false;
     app->screen = SCREEN_GB_PLAYER;
 }
 
@@ -573,7 +598,7 @@ static void draw_gb_player(const app_state_t *app)
 
             snprintf(line, sizeof(line), "LCD %02X BG %u/%u", ppu_stats.lcdc, ppu_stats.tile_data_nonzero, ppu_stats.bg_map_nonzero);
             draw_text(42, 358, line, board_rgb565(110, 124, 136), 2);
-            snprintf(line, sizeof(line), "IE %02X IF %02X IME %u V%u", core->ie & 0x1F, core->io[0x0F] & 0x1F, core->ime ? 1 : 0, (unsigned int)core->vblank_count);
+            snprintf(line, sizeof(line), "IE %02X IF %02X IME %u J%02X V%u", core->ie & 0x1F, core->io[0x0F] & 0x1F, core->ime ? 1 : 0, core->joypad_buttons, (unsigned int)core->vblank_count);
             draw_text(42, 382, line, board_rgb565(110, 124, 136), 2);
             gb_ppu_draw_preview(core, 420, 82);
         } else {
@@ -581,8 +606,13 @@ static void draw_gb_player(const app_state_t *app)
         }
     }
 
-    draw_text(42, 396, app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET" : "KEY0 AUTO KEY1 STEP KEY2 RESET", board_rgb565(110, 124, 136), 2);
-    draw_text(520, 396, "BOOT BACK", board_rgb565(110, 124, 136), 2);
+    if (app->gb_play_mode) {
+        draw_text(42, 396, "PLAY K0R K2L K3U K1D BOOT A", board_rgb565(110, 124, 136), 2);
+        draw_text(520, 396, "K0+K2 DEBUG", board_rgb565(110, 124, 136), 2);
+    } else {
+        draw_text(42, 396, app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET KEY3 PLAY" : "KEY0 AUTO KEY1 STEP KEY2 RESET KEY3 PLAY", board_rgb565(110, 124, 136), 2);
+        draw_text(612, 396, "BOOT BACK", board_rgb565(110, 124, 136), 2);
+    }
     board_end_frame();
 }
 
@@ -632,11 +662,17 @@ static void draw_gb_player_dynamic(const app_state_t *app)
     snprintf(line, sizeof(line), "LCD %02X BG %u/%u", ppu_stats.lcdc, ppu_stats.tile_data_nonzero, ppu_stats.bg_map_nonzero);
     draw_text(GB_STATS_X, GB_STATS_Y + 192, line, board_rgb565(110, 124, 136), 2);
 
-    snprintf(line, sizeof(line), "IE %02X IF %02X IME %u V%u", core->ie & 0x1F, core->io[0x0F] & 0x1F, core->ime ? 1 : 0, (unsigned int)core->vblank_count);
+    snprintf(line, sizeof(line), "IE %02X IF %02X IME %u J%02X V%u", core->ie & 0x1F, core->io[0x0F] & 0x1F, core->ime ? 1 : 0, core->joypad_buttons, (unsigned int)core->vblank_count);
     draw_text(GB_STATS_X, GB_STATS_Y + 216, line, board_rgb565(110, 124, 136), 2);
 
-    board_fill_rect(42, 396, 458, 18, board_rgb565(20, 24, 28));
-    draw_text(42, 396, app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET" : "KEY0 AUTO KEY1 STEP KEY2 RESET", board_rgb565(110, 124, 136), 2);
+    board_fill_rect(42, 396, 710, 18, board_rgb565(20, 24, 28));
+    if (app->gb_play_mode) {
+        draw_text(42, 396, "PLAY K0R K2L K3U K1D BOOT A", board_rgb565(110, 124, 136), 2);
+        draw_text(520, 396, "K0+K2 DEBUG", board_rgb565(110, 124, 136), 2);
+    } else {
+        draw_text(42, 396, app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET KEY3 PLAY" : "KEY0 AUTO KEY1 STEP KEY2 RESET KEY3 PLAY", board_rgb565(110, 124, 136), 2);
+        draw_text(612, 396, "BOOT BACK", board_rgb565(110, 124, 136), 2);
+    }
     gb_ppu_draw_preview(core, GB_PREVIEW_X, GB_PREVIEW_Y);
     board_end_frame();
 }
@@ -807,8 +843,19 @@ void game_run(void)
         }
 
         if (app.screen == SCREEN_GB_PLAYER) {
-            if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
+            if (app.gb_play_mode) {
+                if (input.pressed[BOARD_BUTTON_KEY0] && input.pressed[BOARD_BUTTON_KEY2]) {
+                    app.gb_play_mode = false;
+                    app.gb_autorun = true;
+                    gb_player_set_buttons(&app.gb_player, 0);
+                    draw_gb_player_dynamic(&app);
+                } else {
+                    gb_player_set_buttons(&app.gb_player, gb_buttons_from_input(&input));
+                }
+            } else if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
                 app.gb_autorun = false;
+                app.gb_play_mode = false;
+                gb_player_set_buttons(&app.gb_player, 0);
                 gb_player_unload(&app.gb_player);
                 app.screen = SCREEN_ROM_INFO;
                 draw_rom_info(&app);
@@ -820,7 +867,14 @@ void game_run(void)
                 draw_gb_player_dynamic(&app);
             } else if (input.changed[BOARD_BUTTON_KEY2] && input.pressed[BOARD_BUTTON_KEY2]) {
                 app.gb_autorun = false;
+                app.gb_play_mode = false;
+                gb_player_set_buttons(&app.gb_player, 0);
                 app.gb_load_status = gb_player_reset_core(&app.gb_player);
+                draw_gb_player_dynamic(&app);
+            } else if (input.changed[BOARD_BUTTON_KEY3] && input.pressed[BOARD_BUTTON_KEY3]) {
+                app.gb_play_mode = true;
+                app.gb_autorun = true;
+                gb_player_set_buttons(&app.gb_player, gb_buttons_from_input(&input));
                 draw_gb_player_dynamic(&app);
             }
 

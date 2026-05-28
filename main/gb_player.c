@@ -83,3 +83,10 @@ void gb_player_run_steps(gb_player_t *player, uint32_t steps)
         gb_core_run(player->core, steps);
     }
 }
+
+void gb_player_set_buttons(gb_player_t *player, uint8_t buttons)
+{
+    if (player != NULL && player->core != NULL) {
+        gb_core_set_buttons(player->core, buttons);
+    }
+}
