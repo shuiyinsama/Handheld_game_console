@@ -20,8 +20,26 @@
 #define IO_IF   0x0F
 #define IO_LCDC 0x40
 #define IO_STAT 0x41
+#define IO_SCY  0x42
+#define IO_SCX  0x43
 #define IO_LY   0x44
 #define IO_LYC  0x45
+#define IO_DMA  0x46
+#define IO_BGP  0x47
+#define IO_OBP0 0x48
+#define IO_OBP1 0x49
+#define IO_WY   0x4A
+#define IO_WX   0x4B
+#define IO_VBK  0x4F
+#define IO_HDMA1 0x51
+#define IO_HDMA2 0x52
+#define IO_HDMA3 0x53
+#define IO_HDMA4 0x54
+#define IO_HDMA5 0x55
+#define IO_BCPS 0x68
+#define IO_BCPD 0x69
+#define IO_OCPS 0x6A
+#define IO_OCPD 0x6B
 
 static uint16_t make16(uint8_t hi, uint8_t lo)
 {
@@ -61,6 +79,25 @@ static void gb_core_set_hl(gb_core_t *core, uint16_t value)
 
 static void push16(gb_core_t *core, uint16_t value);
 static void request_interrupt(gb_core_t *core, uint8_t interrupt);
+
+static void init_cgb_palette(uint8_t *palette)
+{
+    static const uint16_t shades[4] = {
+        0x7FFF,
+        0x56B5,
+        0x294A,
+        0x0000,
+    };
+
+    for (int pal = 0; pal < 8; pal++) {
+        for (int color = 0; color < 4; color++) {
+            const uint16_t value = shades[color];
+            const int index = pal * 8 + color * 2;
+            palette[index] = (uint8_t)value;
+            palette[index + 1] = (uint8_t)(value >> 8);
+        }
+    }
+}
 
 static uint8_t read_joyp(const gb_core_t *core)
 {
@@ -106,6 +143,25 @@ static bool is_mbc5(const gb_core_t *core)
     return core->cartridge_type >= 0x19 && core->cartridge_type <= 0x1E;
 }
 
+static bool is_mbc5_rumble(const gb_core_t *core)
+{
+    return core->cartridge_type >= 0x1C && core->cartridge_type <= 0x1E;
+}
+
+static uint8_t external_ram_bank(const gb_core_t *core)
+{
+    if (is_mbc1(core)) {
+        return core->banking_mode == 0 ? 0 : (core->ram_bank & 0x03);
+    }
+    if (is_mbc3(core)) {
+        return core->ram_bank & 0x03;
+    }
+    if (is_mbc5(core)) {
+        return core->ram_bank & 0x0F;
+    }
+    return 0;
+}
+
 static uint8_t read8(const gb_core_t *core, uint16_t addr)
 {
     if (addr < 0x4000) {
@@ -115,10 +171,14 @@ static uint8_t read8(const gb_core_t *core, uint16_t addr)
         return read_rom_bank(core, core->rom_bank, addr - 0x4000);
     }
     if (addr < 0xA000) {
-        return core->vram[addr - 0x8000];
+        return core->vram[core->vram_bank & 0x01][addr - 0x8000];
     }
     if (addr < 0xC000) {
-        return core->eram[addr - 0xA000];
+        if (!core->ram_enabled && (is_mbc1(core) || is_mbc3(core) || is_mbc5(core))) {
+            return 0xFF;
+        }
+        const uint32_t offset = (uint32_t)external_ram_bank(core) * 0x2000U + (addr - 0xA000U);
+        return core->eram[offset % sizeof(core->eram)];
     }
     if (addr < 0xE000) {
         return core->wram[addr - 0xC000];
@@ -139,12 +199,57 @@ static uint8_t read8(const gb_core_t *core, uint16_t addr)
         if (addr == 0xFF0F) {
             return core->io[IO_IF] | 0xE0;
         }
+        if (addr == 0xFF00 + IO_VBK) {
+            return (uint8_t)(0xFE | (core->vram_bank & 0x01));
+        }
+        if (addr == 0xFF00 + IO_BCPS) {
+            return core->bg_palette_index;
+        }
+        if (addr == 0xFF00 + IO_BCPD) {
+            return core->bg_palette[core->bg_palette_index & 0x3F];
+        }
+        if (addr == 0xFF00 + IO_OCPS) {
+            return core->obj_palette_index;
+        }
+        if (addr == 0xFF00 + IO_OCPD) {
+            return core->obj_palette[core->obj_palette_index & 0x3F];
+        }
         return core->io[addr - 0xFF00];
     }
     if (addr < 0xFFFF) {
         return core->hram[addr - 0xFF80];
     }
     return core->ie;
+}
+
+static void run_oam_dma(gb_core_t *core, uint8_t source_hi)
+{
+    const uint16_t source = (uint16_t)source_hi << 8;
+    core->oam_dma_count++;
+    for (uint16_t i = 0; i < 0xA0; i++) {
+        core->oam[i] = read8(core, (uint16_t)(source + i));
+    }
+}
+
+static void run_vram_dma(gb_core_t *core, uint8_t control)
+{
+    uint16_t source = (uint16_t)(((uint16_t)core->io[IO_HDMA1] << 8) | (core->io[IO_HDMA2] & 0xF0));
+    uint16_t dest = (uint16_t)(0x8000 | (((uint16_t)(core->io[IO_HDMA3] & 0x1F) << 8) | (core->io[IO_HDMA4] & 0xF0)));
+    const uint16_t length = (uint16_t)(((control & 0x7F) + 1) * 0x10);
+
+    for (uint16_t i = 0; i < length; i++) {
+        if (dest + i >= 0x8000 && dest + i < 0xA000) {
+            core->vram[core->vram_bank & 0x01][(dest + i) - 0x8000] = read8(core, (uint16_t)(source + i));
+        }
+    }
+
+    source = (uint16_t)(source + length);
+    dest = (uint16_t)(dest + length);
+    core->io[IO_HDMA1] = (uint8_t)(source >> 8);
+    core->io[IO_HDMA2] = (uint8_t)(source & 0xF0);
+    core->io[IO_HDMA3] = (uint8_t)((dest >> 8) & 0x1F);
+    core->io[IO_HDMA4] = (uint8_t)(dest & 0xF0);
+    core->io[IO_HDMA5] = 0xFF;
 }
 
 static void write8(gb_core_t *core, uint16_t addr, uint8_t value)
@@ -189,17 +294,24 @@ static void write8(gb_core_t *core, uint16_t addr, uint8_t value)
             } else if (addr < 0x4000) {
                 core->rom_bank = (core->rom_bank & 0x0FF) | ((uint16_t)(value & 0x01) << 8);
             } else if (addr < 0x6000) {
-                core->ram_bank = value & 0x0F;
+                core->ram_bank = value & (is_mbc5_rumble(core) ? 0x07 : 0x0F);
             }
         }
         return;
     }
     if (addr < 0xA000) {
-        core->vram[addr - 0x8000] = value;
+        core->vram[core->vram_bank & 0x01][addr - 0x8000] = value;
+        core->vram_write_count++;
+        core->last_vram_addr = addr;
+        core->last_vram_value = value;
         return;
     }
     if (addr < 0xC000) {
-        core->eram[addr - 0xA000] = value;
+        if (!core->ram_enabled && (is_mbc1(core) || is_mbc3(core) || is_mbc5(core))) {
+            return;
+        }
+        const uint32_t offset = (uint32_t)external_ram_bank(core) * 0x2000U + (addr - 0xA000U);
+        core->eram[offset % sizeof(core->eram)] = value;
         return;
     }
     if (addr < 0xE000) {
@@ -229,12 +341,57 @@ static void write8(gb_core_t *core, uint16_t addr, uint8_t value)
             core->lcd_counter = 0;
             return;
         }
+        if (reg == IO_DMA) {
+            core->io[IO_DMA] = value;
+            run_oam_dma(core, value);
+            return;
+        }
+        if (reg >= IO_HDMA1 && reg <= IO_HDMA4) {
+            core->io[reg] = value;
+            return;
+        }
+        if (reg == IO_HDMA5) {
+            core->io[IO_HDMA5] = value;
+            run_vram_dma(core, value);
+            return;
+        }
         if (reg == IO_STAT) {
             core->io[IO_STAT] = (uint8_t)((core->io[IO_STAT] & 0x07) | (value & 0x78));
             return;
         }
         if (reg == IO_IF) {
             core->io[IO_IF] = value | 0xE0;
+            return;
+        }
+        if (reg == IO_VBK) {
+            core->vram_bank = value & 0x01;
+            core->io[IO_VBK] = (uint8_t)(0xFE | core->vram_bank);
+            return;
+        }
+        if (reg == IO_BCPS) {
+            core->bg_palette_index = value & 0xBF;
+            core->io[IO_BCPS] = core->bg_palette_index;
+            return;
+        }
+        if (reg == IO_BCPD) {
+            core->bg_palette[core->bg_palette_index & 0x3F] = value;
+            if ((core->bg_palette_index & 0x80) != 0) {
+                core->bg_palette_index = (uint8_t)(0x80 | ((core->bg_palette_index + 1) & 0x3F));
+                core->io[IO_BCPS] = core->bg_palette_index;
+            }
+            return;
+        }
+        if (reg == IO_OCPS) {
+            core->obj_palette_index = value & 0xBF;
+            core->io[IO_OCPS] = core->obj_palette_index;
+            return;
+        }
+        if (reg == IO_OCPD) {
+            core->obj_palette[core->obj_palette_index & 0x3F] = value;
+            if ((core->obj_palette_index & 0x80) != 0) {
+                core->obj_palette_index = (uint8_t)(0x80 | ((core->obj_palette_index + 1) & 0x3F));
+                core->io[IO_OCPS] = core->obj_palette_index;
+            }
             return;
         }
         if (reg == IO_JOYP) {
@@ -678,10 +835,16 @@ void gb_core_init(gb_core_t *core, const uint8_t *rom, size_t rom_size)
     core->rom = rom;
     core->rom_size = rom_size;
     core->cartridge_type = rom_size > 0x147 ? rom[0x147] : 0;
+    core->cgb_mode = rom_size > 0x143 && (rom[0x143] & 0x80) != 0;
     core->rom_bank = 1;
 
-    core->a = 0x11;
-    core->f = 0x80;
+    if (core->cgb_mode) {
+        core->a = 0x11;
+        core->f = 0x80;
+    } else {
+        core->a = 0x01;
+        core->f = 0xB0;
+    }
     core->b = 0x00;
     core->c = 0x13;
     core->d = 0x00;
@@ -698,8 +861,18 @@ void gb_core_init(gb_core_t *core, const uint8_t *rom, size_t rom_size)
     core->io[IO_IF] = 0xE1;
     core->io[IO_LCDC] = 0x91;
     core->io[IO_STAT] = 0x85;
+    core->io[IO_SCY] = 0x00;
+    core->io[IO_SCX] = 0x00;
     core->io[IO_LY] = 0x00;
     core->io[IO_LYC] = 0x00;
+    core->io[IO_BGP] = 0xFC;
+    core->io[IO_OBP0] = 0xFF;
+    core->io[IO_OBP1] = 0xFF;
+    core->io[IO_WY] = 0x00;
+    core->io[IO_WX] = 0x00;
+    core->io[IO_VBK] = 0xFE;
+    init_cgb_palette(core->bg_palette);
+    init_cgb_palette(core->obj_palette);
     core->status = GB_CORE_READY;
 }
 
@@ -840,7 +1013,11 @@ void gb_core_step(gb_core_t *core)
         core->f = carry ? FLAG_C : 0;
         break;
     }
-    case 0x18: core->pc = (uint16_t)(core->pc + (int8_t)fetch8(core)); break;
+    case 0x18: {
+        const int8_t offset = (int8_t)fetch8(core);
+        core->pc = (uint16_t)(core->pc + offset);
+        break;
+    }
     case 0x19: add_hl(core, gb_core_de(core)); break;
     case 0x1A: core->a = read8(core, gb_core_de(core)); break;
     case 0x1B: set16(&core->d, &core->e, (uint16_t)(gb_core_de(core) - 1)); break;
@@ -856,7 +1033,9 @@ void gb_core_step(gb_core_t *core)
     }
     case 0x20: {
         const int8_t offset = (int8_t)fetch8(core);
-        if (!flag_is_set(core, FLAG_Z)) core->pc = (uint16_t)(core->pc + offset);
+        if (!flag_is_set(core, FLAG_Z)) {
+            core->pc = (uint16_t)(core->pc + offset);
+        }
         break;
     }
     case 0x21: gb_core_set_hl(core, fetch16(core)); break;
@@ -868,7 +1047,9 @@ void gb_core_step(gb_core_t *core)
     case 0x27: daa(core); break;
     case 0x28: {
         const int8_t offset = (int8_t)fetch8(core);
-        if (flag_is_set(core, FLAG_Z)) core->pc = (uint16_t)(core->pc + offset);
+        if (flag_is_set(core, FLAG_Z)) {
+            core->pc = (uint16_t)(core->pc + offset);
+        }
         break;
     }
     case 0x29: add_hl(core, gb_core_hl(core)); break;
@@ -880,7 +1061,9 @@ void gb_core_step(gb_core_t *core)
     case 0x2F: core->a = (uint8_t)~core->a; core->f = (core->f & (FLAG_Z | FLAG_C)) | FLAG_N | FLAG_H; break;
     case 0x30: {
         const int8_t offset = (int8_t)fetch8(core);
-        if (!flag_is_set(core, FLAG_C)) core->pc = (uint16_t)(core->pc + offset);
+        if (!flag_is_set(core, FLAG_C)) {
+            core->pc = (uint16_t)(core->pc + offset);
+        }
         break;
     }
     case 0x31: core->sp = fetch16(core); break;
@@ -892,7 +1075,9 @@ void gb_core_step(gb_core_t *core)
     case 0x37: core->f = (core->f & FLAG_Z) | FLAG_C; break;
     case 0x38: {
         const int8_t offset = (int8_t)fetch8(core);
-        if (flag_is_set(core, FLAG_C)) core->pc = (uint16_t)(core->pc + offset);
+        if (flag_is_set(core, FLAG_C)) {
+            core->pc = (uint16_t)(core->pc + offset);
+        }
         break;
     }
     case 0x39: add_hl(core, core->sp); break;

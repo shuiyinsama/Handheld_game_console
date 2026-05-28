@@ -48,6 +48,10 @@ typedef struct {
     uint32_t vblank_count;
     uint32_t interrupt_wake_count;
     uint32_t interrupt_service_count;
+    uint32_t vram_write_count;
+    uint32_t oam_dma_count;
+    uint16_t last_vram_addr;
+    uint8_t last_vram_value;
     uint8_t joypad_buttons;
     gb_core_status_t status;
     const uint8_t *rom;
@@ -57,8 +61,14 @@ typedef struct {
     uint8_t ram_bank;
     bool ram_enabled;
     uint8_t banking_mode;
-    uint8_t vram[0x2000];
-    uint8_t eram[0x2000];
+    bool cgb_mode;
+    uint8_t vram_bank;
+    uint8_t bg_palette_index;
+    uint8_t obj_palette_index;
+    uint8_t bg_palette[0x40];
+    uint8_t obj_palette[0x40];
+    uint8_t vram[2][0x2000];
+    uint8_t eram[0x8000];
     uint8_t wram[0x2000];
     uint8_t oam[0xA0];
     uint8_t io[0x80];

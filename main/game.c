@@ -33,6 +33,11 @@ static const char *TAG = "game";
 #define GB_STATS_H         230
 #define GB_PREVIEW_X       420
 #define GB_PREVIEW_Y       82
+#define GB_PLAY_SCALE      3
+#define GB_PLAY_W          (GB_PPU_SCREEN_W * GB_PLAY_SCALE)
+#define GB_PLAY_H          (GB_PPU_SCREEN_H * GB_PLAY_SCALE)
+#define GB_PLAY_X          ((BOARD_LCD_H_RES - GB_PLAY_W) / 2)
+#define GB_PLAY_Y          ((BOARD_LCD_V_RES - GB_PLAY_H) / 2)
 
 typedef struct {
     int x;
@@ -399,6 +404,11 @@ static const char *cgb_mode_name(uint8_t flag)
     return "DMG";
 }
 
+static bool rom_requires_cgb(uint8_t flag)
+{
+    return flag == 0xC0;
+}
+
 static const char *gb_core_status_name(gb_core_status_t status)
 {
     switch (status) {
@@ -536,9 +546,13 @@ static void draw_rom_info(const app_state_t *app)
             app->rom_info.header_checksum_ok ? "HEADER OK" : "HEADER BAD",
             app->rom_info.header_checksum_ok ? board_rgb565(80, 220, 120) : board_rgb565(236, 92, 92),
             3);
+
+        if (rom_requires_cgb(app->rom_info.cgb_flag)) {
+            draw_text(58, 380, "CGB CORE TODO", board_rgb565(236, 164, 92), 2);
+        }
     }
 
-    draw_text(536, 380, "BOOT LOAD", board_rgb565(110, 124, 136), 2);
+    draw_text(536, 380, rom_requires_cgb(app->rom_info.cgb_flag) ? "BOOT DEBUG" : "BOOT LOAD", board_rgb565(110, 124, 136), 2);
     draw_text(536, 406, "KEY2 BACK", board_rgb565(110, 124, 136), 2);
     board_end_frame();
 }
@@ -569,10 +583,15 @@ static void draw_gb_player(const app_state_t *app)
     } else {
         const storage_loaded_rom_t *rom = &app->gb_player.rom;
         const gb_core_t *core = gb_player_core(&app->gb_player);
+        const bool cgb_only = rom_requires_cgb(rom->info.cgb_flag);
         draw_text(42, 92, rom->info.title, board_rgb565(255, 255, 255), 2);
 
         snprintf(line, sizeof(line), "LOADED %u KB", (unsigned int)(rom->size / 1024));
         draw_text(42, 126, line, board_rgb565(80, 220, 120), 2);
+
+        if (cgb_only) {
+            draw_text(42, 150, "CGB ONLY ROM", board_rgb565(236, 164, 92), 2);
+        }
 
         if (core != NULL) {
             gb_ppu_stats_t ppu_stats = {0};
@@ -598,7 +617,7 @@ static void draw_gb_player(const app_state_t *app)
 
             snprintf(line, sizeof(line), "LCD %02X BG %u/%u", ppu_stats.lcdc, ppu_stats.tile_data_nonzero, ppu_stats.bg_map_nonzero);
             draw_text(42, 358, line, board_rgb565(110, 124, 136), 2);
-            snprintf(line, sizeof(line), "IE %02X IF %02X IME %u J%02X V%u", core->ie & 0x1F, core->io[0x0F] & 0x1F, core->ime ? 1 : 0, core->joypad_buttons, (unsigned int)core->vblank_count);
+            snprintf(line, sizeof(line), "VW %u VA %04X/%02X DMA %u", (unsigned int)core->vram_write_count, core->last_vram_addr, core->last_vram_value, (unsigned int)core->oam_dma_count);
             draw_text(42, 382, line, board_rgb565(110, 124, 136), 2);
             gb_ppu_draw_preview(core, 420, 82);
         } else {
@@ -610,7 +629,9 @@ static void draw_gb_player(const app_state_t *app)
         draw_text(42, 396, "PLAY K0R K2L K3U K1D BOOT A", board_rgb565(110, 124, 136), 2);
         draw_text(520, 396, "K0+K2 DEBUG", board_rgb565(110, 124, 136), 2);
     } else {
-        draw_text(42, 396, app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET KEY3 PLAY" : "KEY0 AUTO KEY1 STEP KEY2 RESET KEY3 PLAY", board_rgb565(110, 124, 136), 2);
+        const storage_loaded_rom_t *rom = &app->gb_player.rom;
+        const bool cgb_only = gb_player_has_rom(&app->gb_player) && rom_requires_cgb(rom->info.cgb_flag);
+        draw_text(42, 396, cgb_only ? "KEY0 AUTO KEY1 STEP KEY2 RESET CGB TODO" : (app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET KEY3 PLAY" : "KEY0 AUTO KEY1 STEP KEY2 RESET KEY3 PLAY"), board_rgb565(110, 124, 136), 2);
         draw_text(612, 396, "BOOT BACK", board_rgb565(110, 124, 136), 2);
     }
     board_end_frame();
@@ -628,6 +649,8 @@ static void draw_gb_player_dynamic(const app_state_t *app)
         draw_gb_player(app);
         return;
     }
+    const storage_loaded_rom_t *rom = &app->gb_player.rom;
+    const bool cgb_only = rom_requires_cgb(rom->info.cgb_flag);
 
     char line[48] = {0};
     gb_ppu_stats_t ppu_stats = {0};
@@ -662,7 +685,7 @@ static void draw_gb_player_dynamic(const app_state_t *app)
     snprintf(line, sizeof(line), "LCD %02X BG %u/%u", ppu_stats.lcdc, ppu_stats.tile_data_nonzero, ppu_stats.bg_map_nonzero);
     draw_text(GB_STATS_X, GB_STATS_Y + 192, line, board_rgb565(110, 124, 136), 2);
 
-    snprintf(line, sizeof(line), "IE %02X IF %02X IME %u J%02X V%u", core->ie & 0x1F, core->io[0x0F] & 0x1F, core->ime ? 1 : 0, core->joypad_buttons, (unsigned int)core->vblank_count);
+    snprintf(line, sizeof(line), "VW %u VA %04X/%02X DMA %u", (unsigned int)core->vram_write_count, core->last_vram_addr, core->last_vram_value, (unsigned int)core->oam_dma_count);
     draw_text(GB_STATS_X, GB_STATS_Y + 216, line, board_rgb565(110, 124, 136), 2);
 
     board_fill_rect(42, 396, 710, 18, board_rgb565(20, 24, 28));
@@ -670,10 +693,27 @@ static void draw_gb_player_dynamic(const app_state_t *app)
         draw_text(42, 396, "PLAY K0R K2L K3U K1D BOOT A", board_rgb565(110, 124, 136), 2);
         draw_text(520, 396, "K0+K2 DEBUG", board_rgb565(110, 124, 136), 2);
     } else {
-        draw_text(42, 396, app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET KEY3 PLAY" : "KEY0 AUTO KEY1 STEP KEY2 RESET KEY3 PLAY", board_rgb565(110, 124, 136), 2);
+        draw_text(42, 396, cgb_only ? "KEY0 AUTO KEY1 STEP KEY2 RESET CGB TODO" : (app->gb_autorun ? "KEY0 PAUSE KEY1 STEP KEY2 RESET KEY3 PLAY" : "KEY0 AUTO KEY1 STEP KEY2 RESET KEY3 PLAY"), board_rgb565(110, 124, 136), 2);
         draw_text(612, 396, "BOOT BACK", board_rgb565(110, 124, 136), 2);
     }
     gb_ppu_draw_preview(core, GB_PREVIEW_X, GB_PREVIEW_Y);
+    board_end_frame();
+}
+
+static void draw_gb_play_screen(const app_state_t *app)
+{
+    const gb_core_t *core = gb_player_core(&app->gb_player);
+    if (app->gb_load_status != ESP_OK || core == NULL) {
+        draw_gb_player(app);
+        return;
+    }
+
+    board_begin_frame();
+    board_fill_screen(board_rgb565(10, 13, 16));
+    gb_ppu_draw_screen_scaled(core, GB_PLAY_X, GB_PLAY_Y, GB_PLAY_SCALE);
+    draw_text(34, 28, "PLAY", board_rgb565(235, 220, 92), 2);
+    draw_text(34, 54, "K0+K2", board_rgb565(110, 124, 136), 2);
+    draw_text(34, 78, "DEBUG", board_rgb565(110, 124, 136), 2);
     board_end_frame();
 }
 
@@ -848,7 +888,7 @@ void game_run(void)
                     app.gb_play_mode = false;
                     app.gb_autorun = true;
                     gb_player_set_buttons(&app.gb_player, 0);
-                    draw_gb_player_dynamic(&app);
+                    draw_gb_player(&app);
                 } else {
                     gb_player_set_buttons(&app.gb_player, gb_buttons_from_input(&input));
                 }
@@ -872,15 +912,24 @@ void game_run(void)
                 app.gb_load_status = gb_player_reset_core(&app.gb_player);
                 draw_gb_player_dynamic(&app);
             } else if (input.changed[BOARD_BUTTON_KEY3] && input.pressed[BOARD_BUTTON_KEY3]) {
-                app.gb_play_mode = true;
-                app.gb_autorun = true;
-                gb_player_set_buttons(&app.gb_player, gb_buttons_from_input(&input));
-                draw_gb_player_dynamic(&app);
+                const bool cgb_only =
+                    gb_player_has_rom(&app.gb_player) &&
+                    rom_requires_cgb(app.gb_player.rom.info.cgb_flag);
+                if (!cgb_only) {
+                    app.gb_play_mode = true;
+                    app.gb_autorun = true;
+                    gb_player_set_buttons(&app.gb_player, gb_buttons_from_input(&input));
+                    draw_gb_play_screen(&app);
+                }
             }
 
             if (app.screen == SCREEN_GB_PLAYER && app.gb_autorun) {
                 gb_player_run_steps(&app.gb_player, 4096);
-                draw_gb_player_dynamic(&app);
+                if (app.gb_play_mode) {
+                    draw_gb_play_screen(&app);
+                } else {
+                    draw_gb_player_dynamic(&app);
+                }
             }
             vTaskDelay(pdMS_TO_TICKS(33));
             continue;

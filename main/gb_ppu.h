@@ -19,4 +19,5 @@ typedef struct {
 } gb_ppu_stats_t;
 
 void gb_ppu_draw_preview(const gb_core_t *core, int x, int y);
+void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale);
 void gb_ppu_get_stats(const gb_core_t *core, gb_ppu_stats_t *stats);
