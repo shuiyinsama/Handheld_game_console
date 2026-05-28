@@ -254,9 +254,12 @@ esp_err_t storage_load_rom(const char *name, storage_loaded_rom_t *rom)
     }
     rewind(file);
 
-    uint8_t *data = heap_caps_malloc((size_t)file_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    uint8_t *data = NULL;
+    if (file_size <= 160 * 1024) {
+        data = heap_caps_malloc((size_t)file_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
     if (data == NULL) {
-        data = heap_caps_malloc((size_t)file_size, MALLOC_CAP_8BIT);
+        data = heap_caps_malloc((size_t)file_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     }
     if (data == NULL) {
         fclose(file);

@@ -39,7 +39,7 @@ static const char *TAG = "game";
 #define GB_PLAY_X          ((BOARD_LCD_H_RES - GB_PLAY_W) / 2)
 #define GB_PLAY_Y          ((BOARD_LCD_V_RES - GB_PLAY_H) / 2)
 #define GB_DEBUG_RUN_STEPS      4096
-#define GB_PLAY_RUN_CHUNK       8192
+#define GB_PLAY_RUN_CHUNK       512
 #define GB_PLAY_MAX_FRAME_STEPS 65536
 
 typedef struct {

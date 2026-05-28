@@ -57,9 +57,9 @@ esp_err_t gb_player_reset_core(gb_player_t *player)
     }
 
     if (player->core == NULL) {
-        player->core = heap_caps_calloc(1, sizeof(gb_core_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        player->core = heap_caps_calloc(1, sizeof(gb_core_t), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (player->core == NULL) {
-            player->core = heap_caps_calloc(1, sizeof(gb_core_t), MALLOC_CAP_8BIT);
+            player->core = heap_caps_calloc(1, sizeof(gb_core_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         }
     }
     if (player->core == NULL) {
