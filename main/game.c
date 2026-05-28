@@ -38,6 +38,9 @@ static const char *TAG = "game";
 #define GB_PLAY_H          (GB_PPU_SCREEN_H * GB_PLAY_SCALE)
 #define GB_PLAY_X          ((BOARD_LCD_H_RES - GB_PLAY_W) / 2)
 #define GB_PLAY_Y          ((BOARD_LCD_V_RES - GB_PLAY_H) / 2)
+#define GB_DEBUG_RUN_STEPS      4096
+#define GB_PLAY_RUN_CHUNK       8192
+#define GB_PLAY_MAX_FRAME_STEPS 65536
 
 typedef struct {
     int x;
@@ -81,6 +84,7 @@ typedef struct {
     esp_err_t gb_load_status;
     bool gb_autorun;
     bool gb_play_mode;
+    bool gb_play_static_drawn;
     char rom_names[ROM_LIST_MAX][STORAGE_ROM_NAME_MAX];
     game_state_t collect;
 } app_state_t;
@@ -425,19 +429,31 @@ static uint8_t gb_buttons_from_input(const board_input_t *input)
 {
     uint8_t buttons = 0;
 
+    const bool boot = input->pressed[BOARD_BUTTON_BOOT];
+    const bool boot_combo = boot &&
+        (input->pressed[BOARD_BUTTON_KEY1] ||
+         input->pressed[BOARD_BUTTON_KEY2] ||
+         input->pressed[BOARD_BUTTON_KEY3]);
+
     if (input->pressed[BOARD_BUTTON_KEY0]) {
         buttons |= GB_BUTTON_RIGHT;
     }
-    if (input->pressed[BOARD_BUTTON_KEY2]) {
+    if (input->pressed[BOARD_BUTTON_KEY2] && !boot_combo) {
         buttons |= GB_BUTTON_LEFT;
     }
-    if (input->pressed[BOARD_BUTTON_KEY3]) {
+    if (input->pressed[BOARD_BUTTON_KEY3] && !boot_combo) {
         buttons |= GB_BUTTON_UP;
     }
-    if (input->pressed[BOARD_BUTTON_KEY1]) {
+    if (input->pressed[BOARD_BUTTON_KEY1] && !boot_combo) {
         buttons |= GB_BUTTON_DOWN;
     }
-    if (input->pressed[BOARD_BUTTON_BOOT]) {
+    if (boot && input->pressed[BOARD_BUTTON_KEY3]) {
+        buttons |= GB_BUTTON_START;
+    } else if (boot && input->pressed[BOARD_BUTTON_KEY1]) {
+        buttons |= GB_BUTTON_SELECT;
+    } else if (boot && input->pressed[BOARD_BUTTON_KEY2]) {
+        buttons |= GB_BUTTON_B;
+    } else if (boot) {
         buttons |= GB_BUTTON_A;
     }
 
@@ -565,6 +581,7 @@ static void load_selected_rom(app_state_t *app)
     app->gb_load_status = gb_player_load(&app->gb_player, app->rom_names[app->rom_selected]);
     app->gb_autorun = false;
     app->gb_play_mode = false;
+    app->gb_play_static_drawn = false;
     app->screen = SCREEN_GB_PLAYER;
 }
 
@@ -700,7 +717,7 @@ static void draw_gb_player_dynamic(const app_state_t *app)
     board_end_frame();
 }
 
-static void draw_gb_play_screen(const app_state_t *app)
+static void draw_gb_play_screen(app_state_t *app)
 {
     const gb_core_t *core = gb_player_core(&app->gb_player);
     if (app->gb_load_status != ESP_OK || core == NULL) {
@@ -709,12 +726,34 @@ static void draw_gb_play_screen(const app_state_t *app)
     }
 
     board_begin_frame();
-    board_fill_screen(board_rgb565(10, 13, 16));
+    if (!app->gb_play_static_drawn) {
+        board_fill_screen(board_rgb565(10, 13, 16));
+        draw_text(34, 28, "PLAY", board_rgb565(235, 220, 92), 2);
+        draw_text(34, 54, "K0+K2", board_rgb565(110, 124, 136), 2);
+        draw_text(34, 78, "DEBUG", board_rgb565(110, 124, 136), 2);
+        draw_text(34, 430, "BT=A BT+U=START BT+D=SELECT BT+L=B", board_rgb565(110, 124, 136), 1);
+        app->gb_play_static_drawn = true;
+    }
     gb_ppu_draw_screen_scaled(core, GB_PLAY_X, GB_PLAY_Y, GB_PLAY_SCALE);
-    draw_text(34, 28, "PLAY", board_rgb565(235, 220, 92), 2);
-    draw_text(34, 54, "K0+K2", board_rgb565(110, 124, 136), 2);
-    draw_text(34, 78, "DEBUG", board_rgb565(110, 124, 136), 2);
     board_end_frame();
+}
+
+static void run_gb_play_frame(app_state_t *app)
+{
+    const gb_core_t *core = gb_player_core(&app->gb_player);
+    if (core == NULL) {
+        return;
+    }
+
+    const uint32_t start_vblank = core->vblank_count;
+    uint32_t ran_steps = 0;
+    do {
+        gb_player_run_steps(&app->gb_player, GB_PLAY_RUN_CHUNK);
+        ran_steps += GB_PLAY_RUN_CHUNK;
+        core = gb_player_core(&app->gb_player);
+    } while (core != NULL &&
+             core->vblank_count == start_vblank &&
+             ran_steps < GB_PLAY_MAX_FRAME_STEPS);
 }
 
 static bool update_player(const board_input_t *input, player_t *player)
@@ -886,6 +925,7 @@ void game_run(void)
             if (app.gb_play_mode) {
                 if (input.pressed[BOARD_BUTTON_KEY0] && input.pressed[BOARD_BUTTON_KEY2]) {
                     app.gb_play_mode = false;
+                    app.gb_play_static_drawn = false;
                     app.gb_autorun = true;
                     gb_player_set_buttons(&app.gb_player, 0);
                     draw_gb_player(&app);
@@ -895,6 +935,7 @@ void game_run(void)
             } else if (input.changed[BOARD_BUTTON_BOOT] && input.pressed[BOARD_BUTTON_BOOT]) {
                 app.gb_autorun = false;
                 app.gb_play_mode = false;
+                app.gb_play_static_drawn = false;
                 gb_player_set_buttons(&app.gb_player, 0);
                 gb_player_unload(&app.gb_player);
                 app.screen = SCREEN_ROM_INFO;
@@ -908,6 +949,7 @@ void game_run(void)
             } else if (input.changed[BOARD_BUTTON_KEY2] && input.pressed[BOARD_BUTTON_KEY2]) {
                 app.gb_autorun = false;
                 app.gb_play_mode = false;
+                app.gb_play_static_drawn = false;
                 gb_player_set_buttons(&app.gb_player, 0);
                 app.gb_load_status = gb_player_reset_core(&app.gb_player);
                 draw_gb_player_dynamic(&app);
@@ -917,6 +959,7 @@ void game_run(void)
                     rom_requires_cgb(app.gb_player.rom.info.cgb_flag);
                 if (!cgb_only) {
                     app.gb_play_mode = true;
+                    app.gb_play_static_drawn = false;
                     app.gb_autorun = true;
                     gb_player_set_buttons(&app.gb_player, gb_buttons_from_input(&input));
                     draw_gb_play_screen(&app);
@@ -924,14 +967,18 @@ void game_run(void)
             }
 
             if (app.screen == SCREEN_GB_PLAYER && app.gb_autorun) {
-                gb_player_run_steps(&app.gb_player, 4096);
+                if (app.gb_play_mode) {
+                    run_gb_play_frame(&app);
+                } else {
+                    gb_player_run_steps(&app.gb_player, GB_DEBUG_RUN_STEPS);
+                }
                 if (app.gb_play_mode) {
                     draw_gb_play_screen(&app);
                 } else {
                     draw_gb_player_dynamic(&app);
                 }
             }
-            vTaskDelay(pdMS_TO_TICKS(33));
+            vTaskDelay(app.gb_play_mode ? 1 : pdMS_TO_TICKS(33));
             continue;
         }
 

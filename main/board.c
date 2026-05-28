@@ -42,6 +42,10 @@ static uint16_t *s_frame_buffers[2];
 static uint8_t s_back_buffer_index;
 static uint8_t s_batch_depth;
 static bool s_frame_dirty;
+static int s_dirty_x1;
+static int s_dirty_y1;
+static int s_dirty_x2;
+static int s_dirty_y2;
 static volatile bool s_frame_done;
 
 void board_present(void);
@@ -234,8 +238,30 @@ static uint16_t *back_buffer(void)
     return s_frame_buffers[s_back_buffer_index];
 }
 
-static void mark_dirty(void)
+static void mark_dirty_rect(int x1, int y1, int x2, int y2)
 {
+    if (x2 <= x1 || y2 <= y1) {
+        return;
+    }
+    if (!s_frame_dirty) {
+        s_dirty_x1 = x1;
+        s_dirty_y1 = y1;
+        s_dirty_x2 = x2;
+        s_dirty_y2 = y2;
+    } else {
+        if (x1 < s_dirty_x1) {
+            s_dirty_x1 = x1;
+        }
+        if (y1 < s_dirty_y1) {
+            s_dirty_y1 = y1;
+        }
+        if (x2 > s_dirty_x2) {
+            s_dirty_x2 = x2;
+        }
+        if (y2 > s_dirty_y2) {
+            s_dirty_y2 = y2;
+        }
+    }
     s_frame_dirty = true;
     if (s_batch_depth == 0) {
         board_present();
@@ -312,7 +338,7 @@ void board_fill_rect(int x0, int y0, int w, int h, uint16_t color)
             row[x] = color;
         }
     }
-    mark_dirty();
+    mark_dirty_rect(x1, y1, x2, y2);
 }
 
 void board_fill_screen(uint16_t color)
@@ -321,7 +347,7 @@ void board_fill_screen(uint16_t color)
     for (size_t i = 0; i < BOARD_LCD_H_RES * BOARD_LCD_V_RES; i++) {
         canvas[i] = color;
     }
-    mark_dirty();
+    mark_dirty_rect(0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES);
 }
 
 void board_draw_rgb565_bitmap(int x0, int y0, int w, int h, const uint16_t *pixels)
@@ -346,7 +372,7 @@ void board_draw_rgb565_bitmap(int x0, int y0, int w, int h, const uint16_t *pixe
         const int src_x = x1 - x0;
         memcpy(&canvas[y * BOARD_LCD_H_RES + x1], &pixels[src_y * w + src_x], clipped_w * sizeof(uint16_t));
     }
-    mark_dirty();
+    mark_dirty_rect(x1, y1, x2, y2);
 }
 
 void board_begin_frame(void)
@@ -372,6 +398,11 @@ void board_present(void)
     }
 
     uint16_t *front = back_buffer();
+    const int dirty_x1 = s_dirty_x1;
+    const int dirty_y1 = s_dirty_y1;
+    const int dirty_x2 = s_dirty_x2;
+    const int dirty_y2 = s_dirty_y2;
+
     s_frame_done = false;
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, front));
 
@@ -381,6 +412,12 @@ void board_present(void)
     }
 
     s_back_buffer_index ^= 1;
-    memcpy(back_buffer(), front, BOARD_LCD_H_RES * BOARD_LCD_V_RES * sizeof(uint16_t));
+    uint16_t *next_back = back_buffer();
+    for (int y = dirty_y1; y < dirty_y2; y++) {
+        memcpy(
+            &next_back[y * BOARD_LCD_H_RES + dirty_x1],
+            &front[y * BOARD_LCD_H_RES + dirty_x1],
+            (size_t)(dirty_x2 - dirty_x1) * sizeof(uint16_t));
+    }
     s_frame_dirty = false;
 }
