@@ -549,6 +549,9 @@ static void draw_gb_player(const app_state_t *app)
 
             snprintf(line, sizeof(line), "STP %u", (unsigned int)core->steps);
             draw_text(58, 388, line, board_rgb565(130, 190, 230), 2);
+
+            snprintf(line, sizeof(line), "LY %03u CY %u", core->io[0x44], (unsigned int)core->cycles);
+            draw_text(320, 388, line, board_rgb565(130, 190, 230), 2);
         }
     }
 

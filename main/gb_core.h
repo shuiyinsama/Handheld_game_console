@@ -25,6 +25,10 @@ typedef struct {
     uint16_t pc;
     bool ime;
     uint8_t ie;
+    uint32_t cycles;
+    uint16_t div_counter;
+    uint16_t timer_counter;
+    uint16_t lcd_counter;
     uint8_t last_opcode;
     uint16_t last_pc;
     uint32_t steps;

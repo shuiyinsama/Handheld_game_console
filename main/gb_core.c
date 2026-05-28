@@ -7,6 +7,21 @@
 #define FLAG_H 0x20
 #define FLAG_C 0x10
 
+#define INT_VBLANK 0x01
+#define INT_LCD    0x02
+#define INT_TIMER  0x04
+
+#define IO_JOYP 0x00
+#define IO_DIV  0x04
+#define IO_TIMA 0x05
+#define IO_TMA  0x06
+#define IO_TAC  0x07
+#define IO_IF   0x0F
+#define IO_LCDC 0x40
+#define IO_STAT 0x41
+#define IO_LY   0x44
+#define IO_LYC  0x45
+
 static uint16_t make16(uint8_t hi, uint8_t lo)
 {
     return ((uint16_t)hi << 8) | lo;
@@ -42,6 +57,8 @@ static void gb_core_set_hl(gb_core_t *core, uint16_t value)
 {
     set16(&core->h, &core->l, value);
 }
+
+static void push16(gb_core_t *core, uint16_t value);
 
 static size_t rom_bank_count(const gb_core_t *core)
 {
@@ -101,6 +118,9 @@ static uint8_t read8(const gb_core_t *core, uint16_t addr)
     if (addr < 0xFF80) {
         if (addr == 0xFF00) {
             return 0xCF;
+        }
+        if (addr == 0xFF0F) {
+            return core->io[IO_IF] | 0xE0;
         }
         return core->io[addr - 0xFF00];
     }
@@ -181,7 +201,26 @@ static void write8(gb_core_t *core, uint16_t addr, uint8_t value)
         return;
     }
     if (addr < 0xFF80) {
-        core->io[addr - 0xFF00] = value;
+        const uint8_t reg = (uint8_t)(addr - 0xFF00);
+        if (reg == IO_DIV) {
+            core->io[IO_DIV] = 0;
+            core->div_counter = 0;
+            return;
+        }
+        if (reg == IO_LY) {
+            core->io[IO_LY] = 0;
+            core->lcd_counter = 0;
+            return;
+        }
+        if (reg == IO_STAT) {
+            core->io[IO_STAT] = (uint8_t)((core->io[IO_STAT] & 0x07) | (value & 0x78));
+            return;
+        }
+        if (reg == IO_IF) {
+            core->io[IO_IF] = value | 0xE0;
+            return;
+        }
+        core->io[reg] = value;
         return;
     }
     if (addr < 0xFFFF) {
@@ -203,6 +242,133 @@ static uint16_t fetch16(gb_core_t *core)
     const uint8_t lo = fetch8(core);
     const uint8_t hi = fetch8(core);
     return make16(hi, lo);
+}
+
+static void request_interrupt(gb_core_t *core, uint8_t interrupt)
+{
+    core->io[IO_IF] = (core->io[IO_IF] | interrupt) | 0xE0;
+}
+
+static uint16_t timer_period_cycles(uint8_t tac)
+{
+    switch (tac & 0x03) {
+    case 0: return 1024;
+    case 1: return 16;
+    case 2: return 64;
+    default: return 256;
+    }
+}
+
+static void tick_timer(gb_core_t *core, uint8_t cycles)
+{
+    core->div_counter = (uint16_t)(core->div_counter + cycles);
+    while (core->div_counter >= 256) {
+        core->div_counter = (uint16_t)(core->div_counter - 256);
+        core->io[IO_DIV]++;
+    }
+
+    const uint8_t tac = core->io[IO_TAC];
+    if ((tac & 0x04) == 0) {
+        return;
+    }
+
+    const uint16_t period = timer_period_cycles(tac);
+    core->timer_counter = (uint16_t)(core->timer_counter + cycles);
+    while (core->timer_counter >= period) {
+        core->timer_counter = (uint16_t)(core->timer_counter - period);
+        if (core->io[IO_TIMA] == 0xFF) {
+            core->io[IO_TIMA] = core->io[IO_TMA];
+            request_interrupt(core, INT_TIMER);
+        } else {
+            core->io[IO_TIMA]++;
+        }
+    }
+}
+
+static void tick_lcd(gb_core_t *core, uint8_t cycles)
+{
+    if ((core->io[IO_LCDC] & 0x80) == 0) {
+        core->io[IO_LY] = 0;
+        core->lcd_counter = 0;
+        core->io[IO_STAT] = (core->io[IO_STAT] & 0xFC) | 0x00;
+        return;
+    }
+
+    core->lcd_counter = (uint16_t)(core->lcd_counter + cycles);
+    while (core->lcd_counter >= 456) {
+        core->lcd_counter = (uint16_t)(core->lcd_counter - 456);
+        core->io[IO_LY]++;
+        if (core->io[IO_LY] == 144) {
+            request_interrupt(core, INT_VBLANK);
+        } else if (core->io[IO_LY] > 153) {
+            core->io[IO_LY] = 0;
+        }
+    }
+
+    uint8_t stat = core->io[IO_STAT] & 0xF8;
+    uint8_t mode = 0;
+    if (core->io[IO_LY] >= 144) {
+        mode = 1;
+    } else if (core->lcd_counter < 80) {
+        mode = 2;
+    } else if (core->lcd_counter < 252) {
+        mode = 3;
+    }
+
+    if (core->io[IO_LY] == core->io[IO_LYC]) {
+        stat |= 0x04;
+        if ((core->io[IO_STAT] & 0x40) != 0) {
+            request_interrupt(core, INT_LCD);
+        }
+    }
+    stat |= mode;
+    core->io[IO_STAT] = stat;
+}
+
+static void gb_core_tick(gb_core_t *core, uint8_t cycles)
+{
+    core->cycles += cycles;
+    tick_timer(core, cycles);
+    tick_lcd(core, cycles);
+}
+
+static bool service_interrupt(gb_core_t *core)
+{
+    const uint8_t pending = core->ie & core->io[IO_IF] & 0x1F;
+    if (pending == 0) {
+        return false;
+    }
+
+    if (core->status == GB_CORE_HALTED) {
+        core->status = GB_CORE_RUNNING;
+    }
+
+    if (!core->ime) {
+        return false;
+    }
+
+    static const uint16_t vectors[5] = {0x40, 0x48, 0x50, 0x58, 0x60};
+    core->ime = false;
+    for (uint8_t i = 0; i < 5; i++) {
+        const uint8_t bit = (uint8_t)(1U << i);
+        if ((pending & bit) != 0) {
+            core->io[IO_IF] = (core->io[IO_IF] & (uint8_t)~bit) | 0xE0;
+            push16(core, core->pc);
+            core->pc = vectors[i];
+            core->last_opcode = 0xFF;
+            core->last_pc = core->pc;
+            core->steps++;
+            gb_core_tick(core, 20);
+            return true;
+        }
+    }
+    return false;
+}
+
+static void finish_instruction(gb_core_t *core, uint8_t cycles)
+{
+    core->steps++;
+    gb_core_tick(core, cycles);
 }
 
 static void write16(gb_core_t *core, uint16_t addr, uint16_t value)
@@ -485,8 +651,16 @@ void gb_core_init(gb_core_t *core, const uint8_t *rom, size_t rom_size)
     core->l = 0x4D;
     core->sp = 0xFFFE;
     core->pc = 0x0100;
-    core->io[0x40] = 0x91;
-    core->io[0x44] = 0x00;
+    core->io[IO_JOYP] = 0xCF;
+    core->io[IO_DIV] = 0xAB;
+    core->io[IO_TIMA] = 0x00;
+    core->io[IO_TMA] = 0x00;
+    core->io[IO_TAC] = 0xF8;
+    core->io[IO_IF] = 0xE1;
+    core->io[IO_LCDC] = 0x91;
+    core->io[IO_STAT] = 0x85;
+    core->io[IO_LY] = 0x00;
+    core->io[IO_LYC] = 0x00;
     core->status = GB_CORE_READY;
 }
 
@@ -496,8 +670,12 @@ void gb_core_step(gb_core_t *core)
         return;
     }
 
+    if (service_interrupt(core)) {
+        return;
+    }
+
     if (core->status == GB_CORE_HALTED || core->status == GB_CORE_STOPPED) {
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
@@ -512,58 +690,58 @@ void gb_core_step(gb_core_t *core)
         } else {
             write_r(core, (opcode >> 3) & 0x07, read_r(core, opcode & 0x07));
         }
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
     if (opcode >= 0x80 && opcode <= 0x87) {
         add_a(core, read_r(core, opcode & 0x07));
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
     if (opcode >= 0x88 && opcode <= 0x8F) {
         adc_a(core, read_r(core, opcode & 0x07));
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
     if (opcode >= 0x90 && opcode <= 0x97) {
         sub_a(core, read_r(core, opcode & 0x07));
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
     if (opcode >= 0x98 && opcode <= 0x9F) {
         sbc_a(core, read_r(core, opcode & 0x07));
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
     if (opcode >= 0xA0 && opcode <= 0xA7) {
         core->a &= read_r(core, opcode & 0x07);
         core->f = core->a == 0 ? FLAG_Z | FLAG_H : FLAG_H;
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
     if (opcode >= 0xA8 && opcode <= 0xAF) {
         core->a ^= read_r(core, opcode & 0x07);
         core->f = core->a == 0 ? FLAG_Z : 0;
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
     if (opcode >= 0xB0 && opcode <= 0xB7) {
         core->a |= read_r(core, opcode & 0x07);
         core->f = core->a == 0 ? FLAG_Z : 0;
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
     if (opcode >= 0xB8 && opcode <= 0xBF) {
         cp_a(core, read_r(core, opcode & 0x07));
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
@@ -594,6 +772,7 @@ void gb_core_step(gb_core_t *core)
         core->f = carry ? FLAG_C : 0;
         break;
     }
+    case 0x10: (void)fetch8(core); break;
     case 0x11: set16(&core->d, &core->e, fetch16(core)); break;
     case 0x12: write8(core, gb_core_de(core), core->a); break;
     case 0x13: set16(&core->d, &core->e, (uint16_t)(gb_core_de(core) + 1)); break;
@@ -644,6 +823,7 @@ void gb_core_step(gb_core_t *core)
     case 0x2C: core->l = inc8(core, core->l); break;
     case 0x2D: core->l = dec8(core, core->l); break;
     case 0x2E: core->l = fetch8(core); break;
+    case 0x2F: core->a = (uint8_t)~core->a; core->f = (core->f & (FLAG_Z | FLAG_C)) | FLAG_N | FLAG_H; break;
     case 0x30: {
         const int8_t offset = (int8_t)fetch8(core);
         if (!flag_is_set(core, FLAG_C)) core->pc = (uint16_t)(core->pc + offset);
@@ -793,17 +973,17 @@ void gb_core_step(gb_core_t *core)
     case 0xFF: push16(core, core->pc); core->pc = 0x38; break;
     default:
         core->status = GB_CORE_UNSUPPORTED_OPCODE;
-        core->steps++;
+        finish_instruction(core, 4);
         return;
     }
 
-    core->steps++;
+    finish_instruction(core, 4);
 }
 
 void gb_core_run(gb_core_t *core, uint32_t max_steps)
 {
     for (uint32_t i = 0; i < max_steps; i++) {
-        if (core->status == GB_CORE_UNSUPPORTED_OPCODE || core->status == GB_CORE_HALTED || core->status == GB_CORE_STOPPED) {
+        if (core->status == GB_CORE_UNSUPPORTED_OPCODE || core->status == GB_CORE_STOPPED) {
             break;
         }
         gb_core_step(core);
