@@ -60,6 +60,32 @@ static esp_err_t make_rom_path(const char *name, char *path, size_t path_size)
     return ESP_OK;
 }
 
+static esp_err_t make_save_path(const char *rom_name, char *path, size_t path_size)
+{
+    if (rom_name == NULL || path == NULL || path_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char save_name[STORAGE_ROM_NAME_MAX] = {0};
+    strlcpy(save_name, rom_name, sizeof(save_name));
+
+    char *dot = strrchr(save_name, '.');
+    if (dot == NULL) {
+        dot = save_name + strlen(save_name);
+    }
+    const size_t prefix_len = (size_t)(dot - save_name);
+    if (prefix_len + 4 >= sizeof(save_name)) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    memcpy(save_name + prefix_len, ".sav", 5);
+
+    const int written = snprintf(path, path_size, "%s/%s", STORAGE_MOUNT_POINT, save_name);
+    if (written < 0 || (size_t)written >= path_size) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+    return ESP_OK;
+}
+
 static void parse_rom_header(const uint8_t *header, storage_rom_info_t *info)
 {
     memset(info, 0, sizeof(*info));
@@ -277,6 +303,58 @@ esp_err_t storage_load_rom(const char *name, storage_loaded_rom_t *rom)
     rom->data = data;
     rom->size = (size_t)file_size;
     parse_rom_header(rom->data, &rom->info);
+    return ESP_OK;
+}
+
+esp_err_t storage_load_save_ram(const char *rom_name, uint8_t *data, size_t size)
+{
+    if (rom_name == NULL || data == NULL || size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_RETURN_ON_ERROR(storage_mount(), TAG, "SD mount failed");
+
+    char path[sizeof(STORAGE_MOUNT_POINT) + STORAGE_ROM_NAME_MAX + 2] = {0};
+    ESP_RETURN_ON_ERROR(make_save_path(rom_name, path, sizeof(path)), TAG, "Save path build failed");
+
+    FILE *file = fopen(path, "rb");
+    if (file == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    const size_t read_len = fread(data, 1, size, file);
+    fclose(file);
+
+    if (read_len == 0) {
+        return ESP_FAIL;
+    }
+    if (read_len < size) {
+        memset(data + read_len, 0, size - read_len);
+    }
+    return ESP_OK;
+}
+
+esp_err_t storage_save_ram(const char *rom_name, const uint8_t *data, size_t size)
+{
+    if (rom_name == NULL || data == NULL || size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ESP_RETURN_ON_ERROR(storage_mount(), TAG, "SD mount failed");
+
+    char path[sizeof(STORAGE_MOUNT_POINT) + STORAGE_ROM_NAME_MAX + 2] = {0};
+    ESP_RETURN_ON_ERROR(make_save_path(rom_name, path, sizeof(path)), TAG, "Save path build failed");
+
+    FILE *file = fopen(path, "wb");
+    if (file == NULL) {
+        return ESP_FAIL;
+    }
+
+    const size_t written = fwrite(data, 1, size, file);
+    const int close_ret = fclose(file);
+    if (written != size || close_ret != 0) {
+        return ESP_FAIL;
+    }
     return ESP_OK;
 }
 
