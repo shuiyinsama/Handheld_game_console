@@ -1,6 +1,7 @@
 #include "gb_ppu.h"
 
 #include "board.h"
+#include "board_config.h"
 #include "esp_heap_caps.h"
 #include <string.h>
 
@@ -143,12 +144,13 @@ static void draw_dmg_background_scaled3(const gb_core_t *core, uint16_t *frame, 
 
     if ((lcdc & 0x01) == 0) {
         const uint16_t color = palette[0];
+        const int scaled_w = GB_PPU_SCREEN_W * 3;
         memset(bg_ids, 0, GB_PPU_SCREEN_W * GB_PPU_SCREEN_H);
         for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
             uint16_t *row0 = &frame[(gy * 3) * frame_w];
             uint16_t *row1 = row0 + frame_w;
             uint16_t *row2 = row1 + frame_w;
-            for (int px = 0; px < frame_w; px++) {
+            for (int px = 0; px < scaled_w; px++) {
                 row0[px] = color;
                 row1[px] = color;
                 row2[px] = color;
@@ -321,6 +323,32 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
     const int frame_w = GB_PPU_SCREEN_W * scale;
     const int frame_h = GB_PPU_SCREEN_H * scale;
     const size_t pixel_count = (size_t)frame_w * frame_h;
+    static uint8_t bg_ids[GB_PPU_SCREEN_W * GB_PPU_SCREEN_H];
+
+    if (!core->cgb_mode &&
+        scale == 3 &&
+        x >= 0 &&
+        y >= 0 &&
+        x + frame_w <= BOARD_LCD_H_RES &&
+        y + frame_h <= BOARD_LCD_V_RES) {
+        uint16_t *canvas = board_get_back_buffer();
+        if (canvas == NULL) {
+            return;
+        }
+
+        uint16_t *frame = &canvas[y * BOARD_LCD_H_RES + x];
+        draw_dmg_background_scaled3(core, frame, BOARD_LCD_H_RES, bg_ids);
+        draw_sprites(core, frame, BOARD_LCD_H_RES, scale, bg_ids);
+
+        const uint16_t border = board_rgb565(92, 108, 92);
+        board_fill_rect(x - 3, y - 3, frame_w + 6, 3, border);
+        board_fill_rect(x - 3, y + frame_h, frame_w + 6, 3, border);
+        board_fill_rect(x - 3, y, 3, frame_h, border);
+        board_fill_rect(x + frame_w, y, 3, frame_h, border);
+        board_mark_dirty_rect(x, y, frame_w, frame_h);
+        return;
+    }
+
     static uint16_t *s_frame = NULL;
     static size_t s_frame_capacity = 0;
     if (s_frame == NULL || s_frame_capacity < pixel_count) {
@@ -344,7 +372,6 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
         return;
     }
 
-    static uint8_t bg_ids[GB_PPU_SCREEN_W * GB_PPU_SCREEN_H];
     if (!core->cgb_mode && scale == 3) {
         draw_dmg_background_scaled3(core, s_frame, frame_w, bg_ids);
     } else {

@@ -3,6 +3,7 @@
 #include "board.h"
 #include "board_config.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "gb_player.h"
@@ -85,6 +86,11 @@ typedef struct {
     bool gb_autorun;
     bool gb_play_mode;
     bool gb_play_static_drawn;
+    int64_t gb_perf_last_us;
+    uint32_t gb_perf_frames;
+    uint32_t gb_perf_fps;
+    uint32_t gb_perf_run_us;
+    uint32_t gb_perf_draw_us;
     char rom_names[ROM_LIST_MAX][STORAGE_ROM_NAME_MAX];
     game_state_t collect;
 } app_state_t;
@@ -582,7 +588,50 @@ static void load_selected_rom(app_state_t *app)
     app->gb_autorun = false;
     app->gb_play_mode = false;
     app->gb_play_static_drawn = false;
+    board_set_frame_sync_enabled(true);
     app->screen = SCREEN_GB_PLAYER;
+}
+
+static void reset_gb_perf(app_state_t *app)
+{
+    app->gb_perf_last_us = esp_timer_get_time();
+    app->gb_perf_frames = 0;
+    app->gb_perf_fps = 0;
+    app->gb_perf_run_us = 0;
+    app->gb_perf_draw_us = 0;
+}
+
+static void update_gb_perf(app_state_t *app)
+{
+    const int64_t now_us = esp_timer_get_time();
+    app->gb_perf_frames++;
+    if (app->gb_perf_last_us == 0) {
+        app->gb_perf_last_us = now_us;
+        app->gb_perf_frames = 0;
+        return;
+    }
+
+    const int64_t elapsed_us = now_us - app->gb_perf_last_us;
+    if (elapsed_us >= 500000) {
+        app->gb_perf_fps = (uint32_t)((app->gb_perf_frames * 1000000ULL + (uint64_t)elapsed_us / 2) / (uint64_t)elapsed_us);
+        app->gb_perf_frames = 0;
+        app->gb_perf_last_us = now_us;
+    }
+}
+
+static void draw_gb_play_perf(const app_state_t *app)
+{
+    char line[24] = {0};
+    const uint16_t bg = board_rgb565(10, 13, 16);
+    const uint16_t fg = board_rgb565(130, 190, 230);
+
+    board_fill_rect(30, 106, 122, 78, bg);
+    snprintf(line, sizeof(line), "FPS %u", (unsigned int)app->gb_perf_fps);
+    draw_text(34, 110, line, fg, 1);
+    snprintf(line, sizeof(line), "RUN %uMS", (unsigned int)((app->gb_perf_run_us + 500) / 1000));
+    draw_text(34, 130, line, fg, 1);
+    snprintf(line, sizeof(line), "DRAW %uMS", (unsigned int)((app->gb_perf_draw_us + 500) / 1000));
+    draw_text(34, 150, line, fg, 1);
 }
 
 static void draw_gb_player(const app_state_t *app)
@@ -732,9 +781,13 @@ static void draw_gb_play_screen(app_state_t *app)
         draw_text(34, 54, "K0+K2", board_rgb565(110, 124, 136), 2);
         draw_text(34, 78, "DEBUG", board_rgb565(110, 124, 136), 2);
         draw_text(34, 430, "BT=A BT+U=START BT+D=SELECT BT+L=B", board_rgb565(110, 124, 136), 1);
-        app->gb_play_static_drawn = true;
     }
     gb_ppu_draw_screen_scaled(core, GB_PLAY_X, GB_PLAY_Y, GB_PLAY_SCALE);
+    draw_gb_play_perf(app);
+    if (!app->gb_play_static_drawn) {
+        board_sync_frame_buffers();
+        app->gb_play_static_drawn = true;
+    }
     board_end_frame();
 }
 
@@ -927,6 +980,7 @@ void game_run(void)
                     app.gb_play_mode = false;
                     app.gb_play_static_drawn = false;
                     app.gb_autorun = true;
+                    board_set_frame_sync_enabled(true);
                     gb_player_set_buttons(&app.gb_player, 0);
                     draw_gb_player(&app);
                 } else {
@@ -936,6 +990,7 @@ void game_run(void)
                 app.gb_autorun = false;
                 app.gb_play_mode = false;
                 app.gb_play_static_drawn = false;
+                board_set_frame_sync_enabled(true);
                 gb_player_set_buttons(&app.gb_player, 0);
                 gb_player_unload(&app.gb_player);
                 app.screen = SCREEN_ROM_INFO;
@@ -950,6 +1005,7 @@ void game_run(void)
                 app.gb_autorun = false;
                 app.gb_play_mode = false;
                 app.gb_play_static_drawn = false;
+                board_set_frame_sync_enabled(true);
                 gb_player_set_buttons(&app.gb_player, 0);
                 app.gb_load_status = gb_player_reset_core(&app.gb_player);
                 draw_gb_player_dynamic(&app);
@@ -961,6 +1017,8 @@ void game_run(void)
                     app.gb_play_mode = true;
                     app.gb_play_static_drawn = false;
                     app.gb_autorun = true;
+                    board_set_frame_sync_enabled(false);
+                    reset_gb_perf(&app);
                     gb_player_set_buttons(&app.gb_player, gb_buttons_from_input(&input));
                     draw_gb_play_screen(&app);
                 }
@@ -968,12 +1026,17 @@ void game_run(void)
 
             if (app.screen == SCREEN_GB_PLAYER && app.gb_autorun) {
                 if (app.gb_play_mode) {
+                    const int64_t run_start_us = esp_timer_get_time();
                     run_gb_play_frame(&app);
+                    app.gb_perf_run_us = (uint32_t)(esp_timer_get_time() - run_start_us);
                 } else {
                     gb_player_run_steps(&app.gb_player, GB_DEBUG_RUN_STEPS);
                 }
                 if (app.gb_play_mode) {
+                    update_gb_perf(&app);
+                    const int64_t draw_start_us = esp_timer_get_time();
                     draw_gb_play_screen(&app);
+                    app.gb_perf_draw_us = (uint32_t)(esp_timer_get_time() - draw_start_us);
                 } else {
                     draw_gb_player_dynamic(&app);
                 }

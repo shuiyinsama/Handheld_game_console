@@ -12,6 +12,7 @@ idf_component_register(
     REQUIRES
         driver
         esp_lcd
+        esp_timer
         fatfs
         sdmmc
 )

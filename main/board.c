@@ -39,6 +39,7 @@ static button_hw_t s_buttons[BOARD_BUTTON_COUNT] = {
 
 static esp_lcd_panel_handle_t s_panel;
 static uint16_t *s_frame_buffers[2];
+static size_t s_frame_buffer_count;
 static uint8_t s_back_buffer_index;
 static uint8_t s_batch_depth;
 static bool s_frame_dirty;
@@ -46,6 +47,7 @@ static int s_dirty_x1;
 static int s_dirty_y1;
 static int s_dirty_x2;
 static int s_dirty_y2;
+static bool s_frame_sync_enabled = true;
 static volatile bool s_frame_done;
 
 void board_present(void);
@@ -213,6 +215,7 @@ static esp_err_t lcd_init(void)
         "RGB frame buffer get failed");
     s_frame_buffers[0] = frame_buffer0;
     s_frame_buffers[1] = frame_buffer1;
+    s_frame_buffer_count = 2;
 
     const esp_lcd_rgb_panel_event_callbacks_t callbacks = {
         .on_frame_buf_complete = lcd_frame_done_callback,
@@ -236,6 +239,11 @@ static esp_err_t lcd_init(void)
 static uint16_t *back_buffer(void)
 {
     return s_frame_buffers[s_back_buffer_index];
+}
+
+uint16_t *board_get_back_buffer(void)
+{
+    return back_buffer();
 }
 
 static void mark_dirty_rect(int x1, int y1, int x2, int y2)
@@ -266,6 +274,35 @@ static void mark_dirty_rect(int x1, int y1, int x2, int y2)
     if (s_batch_depth == 0) {
         board_present();
     }
+}
+
+void board_mark_dirty_rect(int x0, int y0, int w, int h)
+{
+    if (w <= 0 || h <= 0) {
+        return;
+    }
+
+    const int x1 = x0 < 0 ? 0 : x0;
+    const int y1 = y0 < 0 ? 0 : y0;
+    const int x2 = (x0 + w) > BOARD_LCD_H_RES ? BOARD_LCD_H_RES : (x0 + w);
+    const int y2 = (y0 + h) > BOARD_LCD_V_RES ? BOARD_LCD_V_RES : (y0 + h);
+    mark_dirty_rect(x1, y1, x2, y2);
+}
+
+void board_set_frame_sync_enabled(bool enabled)
+{
+    s_frame_sync_enabled = enabled;
+}
+
+void board_sync_frame_buffers(void)
+{
+    if (s_frame_buffer_count < 2 || s_frame_buffers[0] == NULL || s_frame_buffers[1] == NULL) {
+        return;
+    }
+
+    const uint16_t *front = back_buffer();
+    uint16_t *other = s_frame_buffers[s_back_buffer_index ^ 1];
+    memcpy(other, front, BOARD_LCD_H_RES * BOARD_LCD_V_RES * sizeof(uint16_t));
 }
 
 esp_err_t board_init(void)
@@ -393,7 +430,7 @@ void board_end_frame(void)
 
 void board_present(void)
 {
-    if (!s_frame_dirty || s_panel == NULL || s_frame_buffers[0] == NULL || s_frame_buffers[1] == NULL) {
+    if (!s_frame_dirty || s_panel == NULL || s_frame_buffers[0] == NULL) {
         return;
     }
 
@@ -406,18 +443,17 @@ void board_present(void)
     s_frame_done = false;
     ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(s_panel, 0, 0, BOARD_LCD_H_RES, BOARD_LCD_V_RES, front));
 
-    const TickType_t start = xTaskGetTickCount();
-    while (!s_frame_done && (xTaskGetTickCount() - start) < pdMS_TO_TICKS(100)) {
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-
-    s_back_buffer_index ^= 1;
-    uint16_t *next_back = back_buffer();
-    for (int y = dirty_y1; y < dirty_y2; y++) {
-        memcpy(
-            &next_back[y * BOARD_LCD_H_RES + dirty_x1],
-            &front[y * BOARD_LCD_H_RES + dirty_x1],
-            (size_t)(dirty_x2 - dirty_x1) * sizeof(uint16_t));
+    if (s_frame_buffer_count > 1) {
+        s_back_buffer_index ^= 1;
+        if (s_frame_sync_enabled) {
+            uint16_t *next_back = back_buffer();
+            for (int y = dirty_y1; y < dirty_y2; y++) {
+                memcpy(
+                    &next_back[y * BOARD_LCD_H_RES + dirty_x1],
+                    &front[y * BOARD_LCD_H_RES + dirty_x1],
+                    (size_t)(dirty_x2 - dirty_x1) * sizeof(uint16_t));
+            }
+        }
     }
     s_frame_dirty = false;
 }
