@@ -91,6 +91,8 @@ typedef struct {
     uint32_t gb_perf_fps;
     uint32_t gb_perf_run_us;
     uint32_t gb_perf_draw_us;
+    uint32_t gb_perf_ppu_us;
+    uint32_t gb_perf_lcd_us;
     uint8_t gb_perf_redraw_frames;
     char rom_names[ROM_LIST_MAX][STORAGE_ROM_NAME_MAX];
     game_state_t collect;
@@ -600,6 +602,8 @@ static void reset_gb_perf(app_state_t *app)
     app->gb_perf_fps = 0;
     app->gb_perf_run_us = 0;
     app->gb_perf_draw_us = 0;
+    app->gb_perf_ppu_us = 0;
+    app->gb_perf_lcd_us = 0;
     app->gb_perf_redraw_frames = 2;
 }
 
@@ -628,13 +632,17 @@ static void draw_gb_play_perf(const app_state_t *app)
     const uint16_t bg = board_rgb565(10, 13, 16);
     const uint16_t fg = board_rgb565(130, 190, 230);
 
-    board_fill_rect(30, 106, 122, 78, bg);
+    board_fill_rect(30, 106, 122, 118, bg);
     snprintf(line, sizeof(line), "FPS %u", (unsigned int)app->gb_perf_fps);
     draw_text(34, 110, line, fg, 1);
     snprintf(line, sizeof(line), "RUN %uMS", (unsigned int)((app->gb_perf_run_us + 500) / 1000));
     draw_text(34, 130, line, fg, 1);
     snprintf(line, sizeof(line), "DRAW %uMS", (unsigned int)((app->gb_perf_draw_us + 500) / 1000));
     draw_text(34, 150, line, fg, 1);
+    snprintf(line, sizeof(line), "PPU %uMS", (unsigned int)((app->gb_perf_ppu_us + 500) / 1000));
+    draw_text(34, 170, line, fg, 1);
+    snprintf(line, sizeof(line), "LCD %uMS", (unsigned int)((app->gb_perf_lcd_us + 500) / 1000));
+    draw_text(34, 190, line, fg, 1);
 }
 
 static void draw_gb_player(const app_state_t *app)
@@ -785,7 +793,9 @@ static void draw_gb_play_screen(app_state_t *app)
         draw_text(34, 78, "DEBUG", board_rgb565(110, 124, 136), 2);
         draw_text(34, 430, "BT=A BT+U=START BT+D=SELECT BT+L=B", board_rgb565(110, 124, 136), 1);
     }
+    const int64_t ppu_start_us = esp_timer_get_time();
     gb_ppu_draw_screen_scaled(core, GB_PLAY_X, GB_PLAY_Y, GB_PLAY_SCALE);
+    app->gb_perf_ppu_us = (uint32_t)(esp_timer_get_time() - ppu_start_us);
     if (!app->gb_play_static_drawn || app->gb_perf_redraw_frames > 0) {
         draw_gb_play_perf(app);
         if (app->gb_perf_redraw_frames > 0) {
@@ -796,7 +806,9 @@ static void draw_gb_play_screen(app_state_t *app)
         board_sync_frame_buffers();
         app->gb_play_static_drawn = true;
     }
+    const int64_t lcd_start_us = esp_timer_get_time();
     board_end_frame();
+    app->gb_perf_lcd_us = (uint32_t)(esp_timer_get_time() - lcd_start_us);
 }
 
 static void run_gb_play_frame(app_state_t *app)
