@@ -91,6 +91,7 @@ typedef struct {
     uint32_t gb_perf_fps;
     uint32_t gb_perf_run_us;
     uint32_t gb_perf_draw_us;
+    uint8_t gb_perf_redraw_frames;
     char rom_names[ROM_LIST_MAX][STORAGE_ROM_NAME_MAX];
     game_state_t collect;
 } app_state_t;
@@ -599,6 +600,7 @@ static void reset_gb_perf(app_state_t *app)
     app->gb_perf_fps = 0;
     app->gb_perf_run_us = 0;
     app->gb_perf_draw_us = 0;
+    app->gb_perf_redraw_frames = 2;
 }
 
 static void update_gb_perf(app_state_t *app)
@@ -616,6 +618,7 @@ static void update_gb_perf(app_state_t *app)
         app->gb_perf_fps = (uint32_t)((app->gb_perf_frames * 1000000ULL + (uint64_t)elapsed_us / 2) / (uint64_t)elapsed_us);
         app->gb_perf_frames = 0;
         app->gb_perf_last_us = now_us;
+        app->gb_perf_redraw_frames = 2;
     }
 }
 
@@ -783,7 +786,12 @@ static void draw_gb_play_screen(app_state_t *app)
         draw_text(34, 430, "BT=A BT+U=START BT+D=SELECT BT+L=B", board_rgb565(110, 124, 136), 1);
     }
     gb_ppu_draw_screen_scaled(core, GB_PLAY_X, GB_PLAY_Y, GB_PLAY_SCALE);
-    draw_gb_play_perf(app);
+    if (!app->gb_play_static_drawn || app->gb_perf_redraw_frames > 0) {
+        draw_gb_play_perf(app);
+        if (app->gb_perf_redraw_frames > 0) {
+            app->gb_perf_redraw_frames--;
+        }
+    }
     if (!app->gb_play_static_drawn) {
         board_sync_frame_buffers();
         app->gb_play_static_drawn = true;

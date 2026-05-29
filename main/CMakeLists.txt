@@ -16,3 +16,9 @@ idf_component_register(
         fatfs
         sdmmc
 )
+
+set_source_files_properties(
+    "gb_core.c"
+    "gb_ppu.c"
+    PROPERTIES COMPILE_OPTIONS "-O3"
+)
