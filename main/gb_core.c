@@ -437,7 +437,7 @@ static uint16_t timer_period_cycles(uint8_t tac)
     }
 }
 
-static void tick_timer(gb_core_t *core, uint8_t cycles)
+static void tick_timer(gb_core_t *core, uint16_t cycles)
 {
     core->div_counter = (uint16_t)(core->div_counter + cycles);
     while (core->div_counter >= 256) {
@@ -463,7 +463,7 @@ static void tick_timer(gb_core_t *core, uint8_t cycles)
     }
 }
 
-static void tick_lcd(gb_core_t *core, uint8_t cycles)
+static void tick_lcd(gb_core_t *core, uint16_t cycles)
 {
     if ((core->io[IO_LCDC] & 0x80) == 0) {
         core->io[IO_LY] = 0;
@@ -504,11 +504,47 @@ static void tick_lcd(gb_core_t *core, uint8_t cycles)
     core->io[IO_STAT] = stat;
 }
 
-static void gb_core_tick(gb_core_t *core, uint8_t cycles)
+static void gb_core_tick(gb_core_t *core, uint16_t cycles)
 {
     core->cycles += cycles;
     tick_timer(core, cycles);
     tick_lcd(core, cycles);
+}
+
+static uint16_t halted_cycles_until_event(const gb_core_t *core)
+{
+    uint16_t cycles = 252;
+
+    if ((core->io[IO_LCDC] & 0x80) != 0) {
+        uint16_t lcd_cycles = (uint16_t)(456 - core->lcd_counter);
+        if (lcd_cycles == 0 || lcd_cycles > 456) {
+            lcd_cycles = 456;
+        }
+        if (lcd_cycles < cycles) {
+            cycles = lcd_cycles;
+        }
+    }
+
+    const uint8_t tac = core->io[IO_TAC];
+    if ((tac & 0x04) != 0) {
+        const uint16_t period = timer_period_cycles(tac);
+        uint16_t timer_cycles = (uint16_t)(period - core->timer_counter);
+        if (timer_cycles == 0 || timer_cycles > period) {
+            timer_cycles = period;
+        }
+        if (core->io[IO_TIMA] != 0xFF) {
+            const uint16_t increments_until_irq = (uint16_t)(0x100U - core->io[IO_TIMA]);
+            const uint32_t irq_cycles =
+                (uint32_t)timer_cycles + (uint32_t)(increments_until_irq - 1U) * period;
+            timer_cycles = irq_cycles > 252U ? 252U : (uint16_t)irq_cycles;
+        }
+        if (timer_cycles < cycles) {
+            cycles = timer_cycles;
+        }
+    }
+
+    cycles &= (uint16_t)~0x03U;
+    return cycles >= 4 ? cycles : 4;
 }
 
 static void update_ime_delay(gb_core_t *core)
@@ -901,8 +937,9 @@ void gb_core_step(gb_core_t *core)
     }
 
     if (core->status == GB_CORE_HALTED || core->status == GB_CORE_STOPPED) {
-        core->halt_ticks++;
-        gb_core_tick(core, 4);
+        const uint16_t cycles = halted_cycles_until_event(core);
+        core->halt_ticks += cycles / 4;
+        gb_core_tick(core, cycles);
         return;
     }
 
