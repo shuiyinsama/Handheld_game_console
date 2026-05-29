@@ -34,11 +34,9 @@ static const char *TAG = "game";
 #define GB_STATS_H         230
 #define GB_PREVIEW_X       420
 #define GB_PREVIEW_Y       82
-#define GB_PLAY_SCALE      3
-#define GB_PLAY_W          (GB_PPU_SCREEN_W * GB_PLAY_SCALE)
-#define GB_PLAY_H          (GB_PPU_SCREEN_H * GB_PLAY_SCALE)
-#define GB_PLAY_X          ((BOARD_LCD_H_RES - GB_PLAY_W) / 2)
-#define GB_PLAY_Y          ((BOARD_LCD_V_RES - GB_PLAY_H) / 2)
+#define GB_PLAY_DEFAULT_SCALE  3
+#define GB_PLAY_MIN_SCALE      2
+#define GB_PLAY_MAX_SCALE      3
 #define GB_DEBUG_RUN_STEPS      4096
 #define GB_PLAY_RUN_CHUNK       512
 #define GB_PLAY_MAX_FRAME_STEPS 65536
@@ -86,6 +84,7 @@ typedef struct {
     bool gb_autorun;
     bool gb_play_mode;
     bool gb_play_static_drawn;
+    uint8_t gb_play_scale;
     int64_t gb_perf_last_us;
     uint32_t gb_perf_frames;
     uint32_t gb_perf_fps;
@@ -469,6 +468,34 @@ static uint8_t gb_buttons_from_input(const board_input_t *input)
     return buttons;
 }
 
+static int gb_play_scale(const app_state_t *app)
+{
+    if (app->gb_play_scale < GB_PLAY_MIN_SCALE || app->gb_play_scale > GB_PLAY_MAX_SCALE) {
+        return GB_PLAY_DEFAULT_SCALE;
+    }
+    return app->gb_play_scale;
+}
+
+static int gb_play_w(const app_state_t *app)
+{
+    return GB_PPU_SCREEN_W * gb_play_scale(app);
+}
+
+static int gb_play_h(const app_state_t *app)
+{
+    return GB_PPU_SCREEN_H * gb_play_scale(app);
+}
+
+static int gb_play_x(const app_state_t *app)
+{
+    return (BOARD_LCD_H_RES - gb_play_w(app)) / 2;
+}
+
+static int gb_play_y(const app_state_t *app)
+{
+    return (BOARD_LCD_V_RES - gb_play_h(app)) / 2;
+}
+
 static void draw_gb_logo_preview(const uint8_t *rom)
 {
     const int scale = 4;
@@ -591,6 +618,7 @@ static void load_selected_rom(app_state_t *app)
     app->gb_autorun = false;
     app->gb_play_mode = false;
     app->gb_play_static_drawn = false;
+    app->gb_play_scale = GB_PLAY_DEFAULT_SCALE;
     board_set_frame_sync_enabled(true);
     app->screen = SCREEN_GB_PLAYER;
 }
@@ -787,14 +815,18 @@ static void draw_gb_play_screen(app_state_t *app)
 
     board_begin_frame();
     if (!app->gb_play_static_drawn) {
+        char line[16] = {0};
         board_fill_screen(board_rgb565(10, 13, 16));
         draw_text(34, 28, "PLAY", board_rgb565(235, 220, 92), 2);
         draw_text(34, 54, "K0+K2", board_rgb565(110, 124, 136), 2);
         draw_text(34, 78, "DEBUG", board_rgb565(110, 124, 136), 2);
+        draw_text(34, 234, "BT+K1+K3", board_rgb565(110, 124, 136), 1);
+        snprintf(line, sizeof(line), "SCALE %uX", (unsigned int)gb_play_scale(app));
+        draw_text(34, 250, line, board_rgb565(130, 190, 230), 1);
         draw_text(34, 430, "BT=A BT+U=START BT+D=SELECT BT+L=B", board_rgb565(110, 124, 136), 1);
     }
     const int64_t ppu_start_us = esp_timer_get_time();
-    gb_ppu_draw_screen_scaled(core, GB_PLAY_X, GB_PLAY_Y, GB_PLAY_SCALE);
+    gb_ppu_draw_screen_scaled(core, gb_play_x(app), gb_play_y(app), gb_play_scale(app));
     app->gb_perf_ppu_us = (uint32_t)(esp_timer_get_time() - ppu_start_us);
     if (!app->gb_play_static_drawn || app->gb_perf_redraw_frames > 0) {
         draw_gb_play_perf(app);
@@ -1003,6 +1035,17 @@ void game_run(void)
                     board_set_frame_sync_enabled(true);
                     gb_player_set_buttons(&app.gb_player, 0);
                     draw_gb_player(&app);
+                } else if (input.pressed[BOARD_BUTTON_BOOT] &&
+                           input.pressed[BOARD_BUTTON_KEY1] &&
+                           input.pressed[BOARD_BUTTON_KEY3] &&
+                           (input.changed[BOARD_BUTTON_BOOT] ||
+                            input.changed[BOARD_BUTTON_KEY1] ||
+                            input.changed[BOARD_BUTTON_KEY3])) {
+                    app.gb_play_scale = (gb_play_scale(&app) == 3) ? 2 : 3;
+                    app.gb_play_static_drawn = false;
+                    reset_gb_perf(&app);
+                    gb_player_set_buttons(&app.gb_player, 0);
+                    draw_gb_play_screen(&app);
                 } else {
                     gb_player_set_buttons(&app.gb_player, gb_buttons_from_input(&input));
                 }
