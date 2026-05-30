@@ -38,8 +38,10 @@ static const char *TAG = "game";
 #define GB_PLAY_MIN_SCALE      2
 #define GB_PLAY_MAX_SCALE      3
 #define GB_PLAY_MAX_FRAME_SKIP 1
-#define GB_PLAY_TARGET_FPS     29
+#define GB_PLAY_TARGET_FPS     0
+#if GB_PLAY_TARGET_FPS > 0
 #define GB_PLAY_FRAME_US       (1000000 / GB_PLAY_TARGET_FPS)
+#endif
 #define GB_DEBUG_RUN_STEPS      4096
 #define GB_PLAY_RUN_CHUNK       512
 #define GB_PLAY_MAX_FRAME_STEPS 65536
@@ -651,11 +653,16 @@ static void reset_gb_perf(app_state_t *app)
 
 static void reset_gb_play_pacer(app_state_t *app)
 {
+#if GB_PLAY_TARGET_FPS > 0
     app->gb_next_play_frame_us = esp_timer_get_time() + GB_PLAY_FRAME_US;
+#else
+    app->gb_next_play_frame_us = 0;
+#endif
 }
 
 static void pace_gb_play_frame(app_state_t *app)
 {
+#if GB_PLAY_TARGET_FPS > 0
     const int64_t now_us = esp_timer_get_time();
     if (app->gb_next_play_frame_us <= 0) {
         reset_gb_play_pacer(app);
@@ -673,6 +680,9 @@ static void pace_gb_play_frame(app_state_t *app)
     } else {
         app->gb_next_play_frame_us += GB_PLAY_FRAME_US;
     }
+#else
+    (void)app;
+#endif
 }
 
 static void update_gb_perf(app_state_t *app, bool rendered)
@@ -876,7 +886,12 @@ static void draw_gb_play_screen(app_state_t *app)
         draw_text(34, 274, "BT+K0+K1", board_rgb565(110, 124, 136), 1);
         snprintf(line, sizeof(line), "SKIP %u", (unsigned int)app->gb_frame_skip);
         draw_text(34, 290, line, board_rgb565(130, 190, 230), 1);
-        draw_text(34, 306, "CAP 29FPS", board_rgb565(130, 190, 230), 1);
+#if GB_PLAY_TARGET_FPS > 0
+        snprintf(line, sizeof(line), "CAP %uFPS", (unsigned int)GB_PLAY_TARGET_FPS);
+        draw_text(34, 306, line, board_rgb565(130, 190, 230), 1);
+#else
+        draw_text(34, 306, "CAP OFF", board_rgb565(130, 190, 230), 1);
+#endif
         draw_text(34, 430, "BT=A BT+U=START BT+D=SELECT BT+L=B", board_rgb565(110, 124, 136), 1);
     }
     const int64_t ppu_start_us = esp_timer_get_time();
