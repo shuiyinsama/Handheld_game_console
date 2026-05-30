@@ -2,6 +2,7 @@
 
 #include "board.h"
 #include "board_config.h"
+#include "esp_timer.h"
 #include "esp_heap_caps.h"
 #include <string.h>
 
@@ -19,6 +20,8 @@ typedef struct {
     uint8_t attr;
     uint16_t color;
 } gb_pixel_t;
+
+static gb_ppu_perf_t s_last_perf;
 
 static uint16_t dmg_color(uint8_t shade)
 {
@@ -635,7 +638,6 @@ static void draw_cgb_background_scaled3(const gb_core_t *core, uint16_t *frame, 
                 unsigned_tiles,
                 palette);
         }
-
         memcpy(row1, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
         memcpy(row2, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
     }
@@ -763,21 +765,21 @@ static void draw_sprites(const gb_core_t *core, uint16_t *frame, int frame_w, in
 
         for (int visible_index = (int)visible_count - 1; visible_index >= 0; visible_index--) {
             const int sprite = visible[visible_index];
-        const uint8_t *oam = &core->oam[sprite * 4];
-        const int y0 = (int)oam[0] - 16;
-        const int x0 = (int)oam[1] - 8;
-        uint8_t tile = oam[2];
-        const uint8_t attr = oam[3];
-        const bool behind_bg = (attr & 0x80) != 0;
-        const bool flip_y = (attr & 0x40) != 0;
-        const bool flip_x = (attr & 0x20) != 0;
-        const uint8_t obp = (attr & 0x10) ? core->io[IO_OBP1] : core->io[IO_OBP0];
-        const uint8_t cgb_palette = attr & 0x07;
-        const uint8_t bank = core->cgb_mode ? (uint8_t)((attr >> 3) & 0x01) : 0;
+            const uint8_t *oam = &core->oam[sprite * 4];
+            const int y0 = (int)oam[0] - 16;
+            const int x0 = (int)oam[1] - 8;
+            uint8_t tile = oam[2];
+            const uint8_t attr = oam[3];
+            const bool behind_bg = (attr & 0x80) != 0;
+            const bool flip_y = (attr & 0x40) != 0;
+            const bool flip_x = (attr & 0x20) != 0;
+            const uint8_t obp = (attr & 0x10) ? core->io[IO_OBP1] : core->io[IO_OBP0];
+            const uint8_t cgb_palette = attr & 0x07;
+            const uint8_t bank = core->cgb_mode ? (uint8_t)((attr >> 3) & 0x01) : 0;
 
-        if (tall_sprites) {
-            tile &= 0xFE;
-        }
+            if (tall_sprites) {
+                tile &= 0xFE;
+            }
 
             const int sy = dst_y - y0;
             const int tile_y = flip_y ? (sprite_h - 1 - sy) : sy;
@@ -842,12 +844,23 @@ void gb_ppu_get_stats(const gb_core_t *core, gb_ppu_stats_t *stats)
     }
 }
 
+void gb_ppu_get_last_perf(gb_ppu_perf_t *perf)
+{
+    if (perf == NULL) {
+        return;
+    }
+    *perf = s_last_perf;
+}
+
 void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
 {
     if (core == NULL || scale <= 0 || scale > 4) {
+        memset(&s_last_perf, 0, sizeof(s_last_perf));
         return;
     }
 
+    gb_ppu_perf_t perf = {0};
+    const int64_t total_start_us = esp_timer_get_time();
     const int frame_w = GB_PPU_SCREEN_W * scale;
     const int frame_h = GB_PPU_SCREEN_H * scale;
     const size_t pixel_count = (size_t)frame_w * frame_h;
@@ -860,10 +873,12 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
         y + frame_h <= BOARD_LCD_V_RES) {
         uint16_t *canvas = board_get_back_buffer();
         if (canvas == NULL) {
+            memset(&s_last_perf, 0, sizeof(s_last_perf));
             return;
         }
 
         uint16_t *frame = &canvas[y * BOARD_LCD_H_RES + x];
+        const int64_t bg_start_us = esp_timer_get_time();
         if (scale == 3 && core->cgb_mode) {
             draw_cgb_background_scaled3(core, frame, BOARD_LCD_H_RES, bg_ids);
         } else if (scale == 3) {
@@ -873,7 +888,11 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
         } else {
             draw_dmg_background_scaled2(core, frame, BOARD_LCD_H_RES, bg_ids);
         }
+        const int64_t obj_start_us = esp_timer_get_time();
+        perf.bg_us = (uint32_t)(obj_start_us - bg_start_us);
         draw_sprites(core, frame, BOARD_LCD_H_RES, scale, bg_ids);
+        const int64_t misc_start_us = esp_timer_get_time();
+        perf.obj_us = (uint32_t)(misc_start_us - obj_start_us);
 
         const uint16_t border = board_rgb565(92, 108, 92);
         board_fill_rect(x - 3, y - 3, frame_w + 6, 3, border);
@@ -881,6 +900,10 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
         board_fill_rect(x - 3, y, 3, frame_h, border);
         board_fill_rect(x + frame_w, y, 3, frame_h, border);
         board_mark_dirty_rect(x, y, frame_w, frame_h);
+        const int64_t total_end_us = esp_timer_get_time();
+        perf.misc_us = (uint32_t)(total_end_us - misc_start_us);
+        perf.total_us = (uint32_t)(total_end_us - total_start_us);
+        s_last_perf = perf;
         return;
     }
 
@@ -904,9 +927,11 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
         }
     }
     if (s_frame == NULL) {
+        memset(&s_last_perf, 0, sizeof(s_last_perf));
         return;
     }
 
+    const int64_t bg_start_us = esp_timer_get_time();
     if (core->cgb_mode && scale == 3) {
         draw_cgb_background_scaled3(core, s_frame, frame_w, bg_ids);
     } else if (!core->cgb_mode && scale == 3) {
@@ -924,8 +949,12 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
             }
         }
     }
+    const int64_t obj_start_us = esp_timer_get_time();
+    perf.bg_us = (uint32_t)(obj_start_us - bg_start_us);
 
     draw_sprites(core, s_frame, frame_w, scale, bg_ids);
+    const int64_t misc_start_us = esp_timer_get_time();
+    perf.obj_us = (uint32_t)(misc_start_us - obj_start_us);
 
     const uint16_t border = board_rgb565(92, 108, 92);
     board_fill_rect(x - 3, y - 3, frame_w + 6, 3, border);
@@ -933,6 +962,10 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
     board_fill_rect(x - 3, y, 3, frame_h, border);
     board_fill_rect(x + frame_w, y, 3, frame_h, border);
     board_draw_rgb565_bitmap(x, y, frame_w, frame_h, s_frame);
+    const int64_t total_end_us = esp_timer_get_time();
+    perf.misc_us = (uint32_t)(total_end_us - misc_start_us);
+    perf.total_us = (uint32_t)(total_end_us - total_start_us);
+    s_last_perf = perf;
 }
 
 void gb_ppu_draw_preview(const gb_core_t *core, int x, int y)

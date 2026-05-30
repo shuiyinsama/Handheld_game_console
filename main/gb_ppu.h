@@ -18,6 +18,14 @@ typedef struct {
     uint16_t shade_counts[4];
 } gb_ppu_stats_t;
 
+typedef struct {
+    uint32_t bg_us;
+    uint32_t obj_us;
+    uint32_t misc_us;
+    uint32_t total_us;
+} gb_ppu_perf_t;
+
 void gb_ppu_draw_preview(const gb_core_t *core, int x, int y);
 void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale);
 void gb_ppu_get_stats(const gb_core_t *core, gb_ppu_stats_t *stats);
+void gb_ppu_get_last_perf(gb_ppu_perf_t *perf);

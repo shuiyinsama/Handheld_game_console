@@ -39,6 +39,8 @@ static const char *TAG = "game";
 #define GB_PLAY_MAX_SCALE      3
 #define GB_PLAY_MAX_FRAME_SKIP 1
 #define GB_PLAY_TARGET_FPS     0
+#define GB_PLAY_UI_REDRAW_FRAMES 4
+#define GB_PLAY_PERF_CLEAR_W   124
 #if GB_PLAY_TARGET_FPS > 0
 #define GB_PLAY_FRAME_US       (1000000 / GB_PLAY_TARGET_FPS)
 #endif
@@ -102,6 +104,9 @@ typedef struct {
     uint32_t gb_perf_run_us;
     uint32_t gb_perf_draw_us;
     uint32_t gb_perf_ppu_us;
+    uint32_t gb_perf_ppu_bg_us;
+    uint32_t gb_perf_ppu_obj_us;
+    uint32_t gb_perf_ppu_misc_us;
     uint32_t gb_perf_lcd_us;
     uint8_t gb_perf_redraw_frames;
     char rom_names[ROM_LIST_MAX][STORAGE_ROM_NAME_MAX];
@@ -647,8 +652,11 @@ static void reset_gb_perf(app_state_t *app)
     app->gb_perf_run_us = 0;
     app->gb_perf_draw_us = 0;
     app->gb_perf_ppu_us = 0;
+    app->gb_perf_ppu_bg_us = 0;
+    app->gb_perf_ppu_obj_us = 0;
+    app->gb_perf_ppu_misc_us = 0;
     app->gb_perf_lcd_us = 0;
-    app->gb_perf_redraw_frames = 2;
+    app->gb_perf_redraw_frames = GB_PLAY_UI_REDRAW_FRAMES;
 }
 
 static void reset_gb_play_pacer(app_state_t *app)
@@ -706,7 +714,7 @@ static void update_gb_perf(app_state_t *app, bool rendered)
         app->gb_perf_frames = 0;
         app->gb_perf_emu_frames = 0;
         app->gb_perf_last_us = now_us;
-        app->gb_perf_redraw_frames = 2;
+        app->gb_perf_redraw_frames = GB_PLAY_UI_REDRAW_FRAMES;
     }
 }
 
@@ -716,21 +724,23 @@ static void draw_gb_play_perf(const app_state_t *app)
     const uint16_t bg = board_rgb565(10, 13, 16);
     const uint16_t fg = board_rgb565(130, 190, 230);
 
-    board_fill_rect(30, 106, 122, 126, bg);
+    board_fill_rect(30, 106, GB_PLAY_PERF_CLEAR_W, 126, bg);
     snprintf(line, sizeof(line), "FPS %u", (unsigned int)app->gb_perf_fps);
     draw_text(34, 110, line, fg, 1);
-    snprintf(line, sizeof(line), "EMU %u", (unsigned int)app->gb_perf_emu_fps);
-    draw_text(34, 128, line, fg, 1);
     snprintf(line, sizeof(line), "RUN %uMS", (unsigned int)((app->gb_perf_run_us + 500) / 1000));
-    draw_text(34, 146, line, fg, 1);
+    draw_text(34, 126, line, fg, 1);
     snprintf(line, sizeof(line), "DRAW %uMS", (unsigned int)((app->gb_perf_draw_us + 500) / 1000));
-    draw_text(34, 164, line, fg, 1);
+    draw_text(34, 142, line, fg, 1);
     snprintf(line, sizeof(line), "PPU %uMS", (unsigned int)((app->gb_perf_ppu_us + 500) / 1000));
-    draw_text(34, 182, line, fg, 1);
+    draw_text(34, 158, line, fg, 1);
+    snprintf(line, sizeof(line), "BG %uMS", (unsigned int)((app->gb_perf_ppu_bg_us + 500) / 1000));
+    draw_text(34, 174, line, fg, 1);
+    snprintf(line, sizeof(line), "OBJ %uMS", (unsigned int)((app->gb_perf_ppu_obj_us + 500) / 1000));
+    draw_text(34, 190, line, fg, 1);
+    snprintf(line, sizeof(line), "OTH %uMS", (unsigned int)((app->gb_perf_ppu_misc_us + 500) / 1000));
+    draw_text(34, 206, line, fg, 1);
     snprintf(line, sizeof(line), "LCD %uMS", (unsigned int)((app->gb_perf_lcd_us + 500) / 1000));
-    draw_text(34, 200, line, fg, 1);
-    snprintf(line, sizeof(line), "SKIP %u", (unsigned int)app->gb_frame_skip);
-    draw_text(34, 218, line, fg, 1);
+    draw_text(34, 222, line, fg, 1);
 }
 
 static void draw_gb_player(const app_state_t *app)
@@ -896,7 +906,13 @@ static void draw_gb_play_screen(app_state_t *app)
     }
     const int64_t ppu_start_us = esp_timer_get_time();
     gb_ppu_draw_screen_scaled(core, gb_play_x(app), gb_play_y(app), gb_play_scale(app));
-    app->gb_perf_ppu_us = (uint32_t)(esp_timer_get_time() - ppu_start_us);
+    const uint32_t measured_ppu_us = (uint32_t)(esp_timer_get_time() - ppu_start_us);
+    gb_ppu_perf_t ppu_perf = {0};
+    gb_ppu_get_last_perf(&ppu_perf);
+    app->gb_perf_ppu_us = ppu_perf.total_us != 0 ? ppu_perf.total_us : measured_ppu_us;
+    app->gb_perf_ppu_bg_us = ppu_perf.bg_us;
+    app->gb_perf_ppu_obj_us = ppu_perf.obj_us;
+    app->gb_perf_ppu_misc_us = ppu_perf.misc_us;
     if (!app->gb_play_static_drawn || app->gb_perf_redraw_frames > 0) {
         draw_gb_play_perf(app);
         if (app->gb_perf_redraw_frames > 0) {
