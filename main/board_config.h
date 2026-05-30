@@ -19,7 +19,7 @@
  */
 #define BOARD_LCD_H_RES            800
 #define BOARD_LCD_V_RES            480
-#define BOARD_LCD_PIXEL_CLOCK_HZ   (18 * 1000 * 1000)
+#define BOARD_LCD_PIXEL_CLOCK_HZ   (20 * 1000 * 1000)
 
 /* 480x272 fallback:
 #define BOARD_LCD_H_RES            480
@@ -83,4 +83,4 @@
 #define BOARD_LCD_VSYNC_FRONT_PORCH    13
 #define BOARD_LCD_VSYNC_PULSE_WIDTH    48
 
-#define BOARD_LCD_BOUNCE_BUFFER_PIXELS (480 * 10)
+#define BOARD_LCD_BOUNCE_BUFFER_PIXELS (BOARD_LCD_H_RES * 10)
