@@ -21,7 +21,46 @@ typedef struct {
     uint16_t color;
 } gb_pixel_t;
 
+#define GB_PPU_FB_CACHE_COUNT 3
+#define GB_PPU_MAX_SPRITES    40
+
+typedef struct {
+    uint8_t x0;
+    uint8_t y0;
+    uint8_t x1;
+    uint8_t y1;
+} gb_sprite_rect_t;
+
+typedef struct {
+    uint8_t scale;
+    uint16_t x;
+    uint16_t y;
+    uint8_t lcdc;
+    uint8_t scx;
+    uint8_t scy;
+    uint8_t wx;
+    uint8_t wy;
+    uint8_t bgp;
+    bool cgb_mode;
+    uint32_t vram_write_count;
+    uint8_t bg_palette[0x40];
+} gb_bg_signature_t;
+
+typedef struct {
+    uint16_t *fb;
+    bool bg_valid;
+    gb_bg_signature_t sig;
+    gb_sprite_rect_t sprite_rects[GB_PPU_MAX_SPRITES];
+    uint8_t sprite_rect_count;
+} gb_fb_cache_t;
+
 static gb_ppu_perf_t s_last_perf;
+static uint8_t s_bg_ids[GB_PPU_SCREEN_W * GB_PPU_SCREEN_H];
+static uint16_t s_scaled_row3[GB_PPU_SCREEN_W * 3];
+static uint16_t s_scaled_row2[GB_PPU_SCREEN_W * 2];
+static bool s_bg_ids_valid;
+static gb_bg_signature_t s_bg_ids_sig;
+static gb_fb_cache_t s_fb_cache[GB_PPU_FB_CACHE_COUNT];
 
 static uint16_t dmg_color(uint8_t shade)
 {
@@ -52,6 +91,156 @@ static uint16_t cgb_palette_color(const gb_core_t *core, bool object, uint8_t pa
     const uint8_t *data = object ? core->obj_palette : core->bg_palette;
     const uint8_t index = (uint8_t)(((palette & 0x07) * 8 + (color_id & 0x03) * 2) & 0x3F);
     return cgb_color(data[index], data[(index + 1) & 0x3F]);
+}
+
+static uint8_t read_tile_pixel(const gb_core_t *core, uint8_t bank, uint16_t tile_addr, uint8_t x, uint8_t y);
+
+static gb_bg_signature_t make_bg_signature(const gb_core_t *core, int x, int y, int scale)
+{
+    gb_bg_signature_t sig;
+    memset(&sig, 0, sizeof(sig));
+    sig.scale = (uint8_t)scale;
+    sig.x = (uint16_t)x;
+    sig.y = (uint16_t)y;
+    sig.lcdc = core->io[IO_LCDC];
+    sig.scx = core->io[IO_SCX];
+    sig.scy = core->io[IO_SCY];
+    sig.wx = core->io[IO_WX];
+    sig.wy = core->io[IO_WY];
+    sig.bgp = core->io[IO_BGP];
+    sig.cgb_mode = core->cgb_mode;
+    sig.vram_write_count = core->vram_write_count;
+    if (core->cgb_mode) {
+        memcpy(sig.bg_palette, core->bg_palette, sizeof(sig.bg_palette));
+    }
+    return sig;
+}
+
+static bool bg_signature_equal(const gb_bg_signature_t *a, const gb_bg_signature_t *b)
+{
+    return memcmp(a, b, sizeof(*a)) == 0;
+}
+
+static uint8_t bg_miss_reason(const gb_fb_cache_t *cache, const gb_bg_signature_t *new_sig)
+{
+    if (cache == NULL || !cache->bg_valid) {
+        return GB_PPU_BG_MISS_INIT;
+    }
+    if (cache->sig.vram_write_count != new_sig->vram_write_count) {
+        return GB_PPU_BG_MISS_VRAM;
+    }
+    if (cache->sig.scx != new_sig->scx || cache->sig.scy != new_sig->scy) {
+        return GB_PPU_BG_MISS_SCROLL;
+    }
+    return GB_PPU_BG_MISS_REG;
+}
+
+static gb_fb_cache_t *fb_cache_for(uint16_t *fb)
+{
+    for (size_t i = 0; i < GB_PPU_FB_CACHE_COUNT; i++) {
+        if (s_fb_cache[i].fb == fb) {
+            return &s_fb_cache[i];
+        }
+    }
+    for (size_t i = 0; i < GB_PPU_FB_CACHE_COUNT; i++) {
+        if (s_fb_cache[i].fb == NULL) {
+            s_fb_cache[i].fb = fb;
+            s_fb_cache[i].bg_valid = false;
+            s_fb_cache[i].sprite_rect_count = 0;
+            return &s_fb_cache[i];
+        }
+    }
+
+    s_fb_cache[0].fb = fb;
+    s_fb_cache[0].bg_valid = false;
+    s_fb_cache[0].sprite_rect_count = 0;
+    return &s_fb_cache[0];
+}
+
+static uint8_t collect_sprite_rects(const gb_core_t *core, gb_sprite_rect_t rects[GB_PPU_MAX_SPRITES])
+{
+    const uint8_t lcdc = core->io[IO_LCDC];
+    if ((lcdc & 0x02) == 0) {
+        return 0;
+    }
+
+    const int sprite_h = (lcdc & 0x04) ? 16 : 8;
+    uint8_t count = 0;
+    for (int sprite = 0; sprite < 40 && count < GB_PPU_MAX_SPRITES; sprite++) {
+        const uint8_t *oam = &core->oam[sprite * 4];
+        int x0 = (int)oam[1] - 8;
+        int y0 = (int)oam[0] - 16;
+        int x1 = x0 + 8;
+        int y1 = y0 + sprite_h;
+
+        if (x1 <= 0 || x0 >= GB_PPU_SCREEN_W || y1 <= 0 || y0 >= GB_PPU_SCREEN_H) {
+            continue;
+        }
+        if (x0 < 0) {
+            x0 = 0;
+        }
+        if (y0 < 0) {
+            y0 = 0;
+        }
+        if (x1 > GB_PPU_SCREEN_W) {
+            x1 = GB_PPU_SCREEN_W;
+        }
+        if (y1 > GB_PPU_SCREEN_H) {
+            y1 = GB_PPU_SCREEN_H;
+        }
+
+        rects[count++] = (gb_sprite_rect_t){
+            .x0 = (uint8_t)x0,
+            .y0 = (uint8_t)y0,
+            .x1 = (uint8_t)x1,
+            .y1 = (uint8_t)y1,
+        };
+    }
+    return count;
+}
+
+static gb_pixel_t read_bg_or_window_pixel_sig(const gb_core_t *core, const gb_bg_signature_t *sig, uint8_t x, uint8_t y)
+{
+    const uint8_t lcdc = sig->lcdc;
+    if ((lcdc & 0x01) == 0) {
+        return (gb_pixel_t){
+            .color_id = 0,
+            .attr = 0,
+            .color = sig->cgb_mode ? cgb_palette_color(core, false, 0, 0) : dmg_color(0),
+        };
+    }
+
+    const int wx = (int)sig->wx - 7;
+    const int wy = sig->wy;
+    const bool window =
+        (lcdc & 0x20) != 0 &&
+        (int)x >= wx &&
+        (int)y >= wy &&
+        wx < GB_PPU_SCREEN_W &&
+        wy < GB_PPU_SCREEN_H;
+
+    const uint8_t map_x = window ? (uint8_t)((int)x - wx) : (uint8_t)(x + sig->scx);
+    const uint8_t map_y = window ? (uint8_t)((int)y - wy) : (uint8_t)(y + sig->scy);
+    const uint16_t map_base = window ? ((lcdc & 0x40) ? 0x1C00 : 0x1800) : ((lcdc & 0x08) ? 0x1C00 : 0x1800);
+    const uint16_t tile_map_offset = map_base + (map_y / 8) * 32 + (map_x / 8);
+    const uint8_t tile_id = core->vram[0][tile_map_offset & 0x1FFF];
+    const uint8_t attr = sig->cgb_mode ? core->vram[1][tile_map_offset & 0x1FFF] : 0;
+    const bool flip_x = (attr & 0x20) != 0;
+    const bool flip_y = (attr & 0x40) != 0;
+    const uint8_t tile_x = flip_x ? (uint8_t)(7 - (map_x & 0x07)) : (uint8_t)(map_x & 0x07);
+    const uint8_t tile_row = flip_y ? (uint8_t)(7 - (map_y & 0x07)) : (uint8_t)(map_y & 0x07);
+    const uint8_t bank = sig->cgb_mode ? (uint8_t)((attr >> 3) & 0x01) : 0;
+
+    uint16_t tile_addr = 0;
+    if ((lcdc & 0x10) != 0) {
+        tile_addr = (uint16_t)tile_id * 16 + tile_row * 2;
+    } else {
+        tile_addr = (uint16_t)(0x1000 + (int16_t)(int8_t)tile_id * 16 + tile_row * 2);
+    }
+
+    const uint8_t color_id = read_tile_pixel(core, bank, tile_addr, tile_x, 0);
+    const uint16_t color = sig->cgb_mode ? cgb_palette_color(core, false, attr & 0x07, color_id) : dmg_color(map_palette(sig->bgp, color_id));
+    return (gb_pixel_t){.color_id = color_id, .attr = attr, .color = color};
 }
 
 static uint8_t read_tile_pixel(const gb_core_t *core, uint8_t bank, uint16_t tile_addr, uint8_t x, uint8_t y)
@@ -134,6 +323,101 @@ static void put_scaled_pixel3(uint16_t *frame, int frame_w, int x, int y, uint16
     row2[2] = color;
 }
 
+static void restore_bg_rects(
+    const gb_core_t *core,
+    const gb_bg_signature_t *sig,
+    uint16_t *frame,
+    int frame_w,
+    int scale,
+    const gb_sprite_rect_t *rects,
+    uint8_t rect_count)
+{
+    for (uint8_t i = 0; i < rect_count; i++) {
+        const gb_sprite_rect_t *rect = &rects[i];
+        for (int gy = rect->y0; gy < rect->y1; gy++) {
+            for (int gx = rect->x0; gx < rect->x1; gx++) {
+                const gb_pixel_t pixel = read_bg_or_window_pixel_sig(core, sig, (uint8_t)gx, (uint8_t)gy);
+                s_bg_ids[gy * GB_PPU_SCREEN_W + gx] = pixel.color_id;
+                if (scale == 3) {
+                    put_scaled_pixel3(frame, frame_w, gx, gy, pixel.color);
+                } else {
+                    put_scaled_pixel(frame, frame_w, scale, gx, gy, pixel.color);
+                }
+            }
+        }
+    }
+}
+
+static void expand_dmg_tile_row_scaled3(uint8_t lo, uint8_t hi, const uint16_t palette[4], uint16_t out[24], uint8_t ids[8])
+{
+    for (int tx = 0; tx < 8; tx++) {
+        const uint8_t bit = (uint8_t)(7 - tx);
+        const uint8_t color_id = (uint8_t)(((hi >> bit) & 1) << 1 | ((lo >> bit) & 1));
+        const uint16_t color = palette[color_id & 0x03];
+        const int px = tx * 3;
+
+        ids[tx] = color_id;
+        out[px] = color;
+        out[px + 1] = color;
+        out[px + 2] = color;
+    }
+}
+
+static void expand_dmg_tile_row_scaled2(uint8_t lo, uint8_t hi, const uint16_t palette[4], uint16_t out[16], uint8_t ids[8])
+{
+    for (int tx = 0; tx < 8; tx++) {
+        const uint8_t bit = (uint8_t)(7 - tx);
+        const uint8_t color_id = (uint8_t)(((hi >> bit) & 1) << 1 | ((lo >> bit) & 1));
+        const uint16_t color = palette[color_id & 0x03];
+        const int px = tx * 2;
+
+        ids[tx] = color_id;
+        out[px] = color;
+        out[px + 1] = color;
+    }
+}
+
+static void expand_cgb_tile_row_scaled3(
+    uint8_t lo,
+    uint8_t hi,
+    bool flip_x,
+    const uint16_t palette[4],
+    uint16_t out[24],
+    uint8_t ids[8])
+{
+    for (int tx = 0; tx < 8; tx++) {
+        const uint8_t bit = flip_x ? (uint8_t)tx : (uint8_t)(7 - tx);
+        const uint8_t color_id = (uint8_t)(((hi >> bit) & 1) << 1 | ((lo >> bit) & 1));
+        const uint16_t color = palette[color_id & 0x03];
+        const int px = tx * 3;
+
+        ids[tx] = color_id;
+        out[px] = color;
+        out[px + 1] = color;
+        out[px + 2] = color;
+    }
+}
+
+static void expand_cgb_tile_row_scaled2(
+    uint8_t lo,
+    uint8_t hi,
+    bool flip_x,
+    const uint16_t palette[4],
+    uint16_t out[16],
+    uint8_t ids[8])
+{
+    for (int tx = 0; tx < 8; tx++) {
+        const uint8_t bit = flip_x ? (uint8_t)tx : (uint8_t)(7 - tx);
+        const uint8_t color_id = (uint8_t)(((hi >> bit) & 1) << 1 | ((lo >> bit) & 1));
+        const uint16_t color = palette[color_id & 0x03];
+        const int px = tx * 2;
+
+        ids[tx] = color_id;
+        out[px] = color;
+        out[px + 1] = color;
+    }
+}
+
 static void draw_dmg_bg_segment_scaled3(
     const gb_core_t *core,
     uint16_t *row,
@@ -169,18 +453,12 @@ static void draw_dmg_bg_segment_scaled3(
 
         const uint8_t lo = core->vram[0][tile_addr & 0x1FFF];
         const uint8_t hi = core->vram[0][(tile_addr + 1) & 0x1FFF];
+        uint16_t expanded[24];
+        uint8_t ids[8];
 
-        for (int i = 0; i < run; i++) {
-            const uint8_t bit = (uint8_t)(7 - ((tile_x + i) & 0x07));
-            const uint8_t color_id = (uint8_t)(((hi >> bit) & 1) << 1 | ((lo >> bit) & 1));
-            const uint16_t color = palette[color_id & 0x03];
-            const int px = (gx + i) * 3;
-
-            bg_row[gx + i] = color_id;
-            row[px] = color;
-            row[px + 1] = color;
-            row[px + 2] = color;
-        }
+        expand_dmg_tile_row_scaled3(lo, hi, palette, expanded, ids);
+        memcpy(&bg_row[gx], &ids[tile_x], (size_t)run);
+        memcpy(&row[gx * 3], &expanded[tile_x * 3], (size_t)run * 3 * sizeof(uint16_t));
 
         gx += run;
     }
@@ -221,17 +499,10 @@ static void draw_dmg_bg_segment_scaled2(
 
         const uint8_t lo = core->vram[0][tile_addr & 0x1FFF];
         const uint8_t hi = core->vram[0][(tile_addr + 1) & 0x1FFF];
+        const gb_row2_cache_t *cached = get_scaled2_tile_row(lo, hi, false, palette);
 
-        for (int i = 0; i < run; i++) {
-            const uint8_t bit = (uint8_t)(7 - ((tile_x + i) & 0x07));
-            const uint8_t color_id = (uint8_t)(((hi >> bit) & 1) << 1 | ((lo >> bit) & 1));
-            const uint16_t color = palette[color_id & 0x03];
-            const int px = (gx + i) * 2;
-
-            bg_row[gx + i] = color_id;
-            row[px] = color;
-            row[px + 1] = color;
-        }
+        memcpy(&bg_row[gx], &cached->ids[tile_x], (size_t)run);
+        memcpy(&row[gx * 2], &cached->pixels[tile_x * 2], (size_t)run * 2 * sizeof(uint16_t));
 
         gx += run;
     }
@@ -253,14 +524,15 @@ static void draw_dmg_background_scaled3(const gb_core_t *core, uint16_t *frame, 
         const int scaled_w = GB_PPU_SCREEN_W * 3;
         memset(bg_ids, 0, GB_PPU_SCREEN_W * GB_PPU_SCREEN_H);
         for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
-            uint16_t *row0 = &frame[(gy * 3) * frame_w];
-            uint16_t *row1 = row0 + frame_w;
-            uint16_t *row2 = row1 + frame_w;
             for (int px = 0; px < scaled_w; px++) {
-                row0[px] = color;
+                s_scaled_row3[px] = color;
             }
-            memcpy(row1, row0, (size_t)scaled_w * sizeof(uint16_t));
-            memcpy(row2, row0, (size_t)scaled_w * sizeof(uint16_t));
+            uint16_t *dst0 = &frame[(gy * 3) * frame_w];
+            uint16_t *dst1 = dst0 + frame_w;
+            uint16_t *dst2 = dst1 + frame_w;
+            memcpy(dst0, s_scaled_row3, (size_t)scaled_w * sizeof(uint16_t));
+            memcpy(dst1, s_scaled_row3, (size_t)scaled_w * sizeof(uint16_t));
+            memcpy(dst2, s_scaled_row3, (size_t)scaled_w * sizeof(uint16_t));
         }
         return;
     }
@@ -276,9 +548,7 @@ static void draw_dmg_background_scaled3(const gb_core_t *core, uint16_t *frame, 
         wy < GB_PPU_SCREEN_H;
 
     for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
-        uint16_t *row0 = &frame[(gy * 3) * frame_w];
-        uint16_t *row1 = row0 + frame_w;
-        uint16_t *row2 = row1 + frame_w;
+        uint16_t *row0 = s_scaled_row3;
         uint8_t *bg_row = &bg_ids[gy * GB_PPU_SCREEN_W];
         const bool window_row = window_enabled && gy >= wy;
 
@@ -330,8 +600,12 @@ static void draw_dmg_background_scaled3(const gb_core_t *core, uint16_t *frame, 
                 palette);
         }
 
-        memcpy(row1, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
-        memcpy(row2, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
+        uint16_t *dst0 = &frame[(gy * 3) * frame_w];
+        uint16_t *dst1 = dst0 + frame_w;
+        uint16_t *dst2 = dst1 + frame_w;
+        memcpy(dst0, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
+        memcpy(dst1, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
+        memcpy(dst2, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
     }
 }
 
@@ -351,12 +625,13 @@ static void draw_dmg_background_scaled2(const gb_core_t *core, uint16_t *frame, 
         const int scaled_w = GB_PPU_SCREEN_W * 2;
         memset(bg_ids, 0, GB_PPU_SCREEN_W * GB_PPU_SCREEN_H);
         for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
-            uint16_t *row0 = &frame[(gy * 2) * frame_w];
-            uint16_t *row1 = row0 + frame_w;
             for (int px = 0; px < scaled_w; px++) {
-                row0[px] = color;
+                s_scaled_row2[px] = color;
             }
-            memcpy(row1, row0, (size_t)scaled_w * sizeof(uint16_t));
+            uint16_t *dst0 = &frame[(gy * 2) * frame_w];
+            uint16_t *dst1 = dst0 + frame_w;
+            memcpy(dst0, s_scaled_row2, (size_t)scaled_w * sizeof(uint16_t));
+            memcpy(dst1, s_scaled_row2, (size_t)scaled_w * sizeof(uint16_t));
         }
         return;
     }
@@ -372,8 +647,7 @@ static void draw_dmg_background_scaled2(const gb_core_t *core, uint16_t *frame, 
         wy < GB_PPU_SCREEN_H;
 
     for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
-        uint16_t *row0 = &frame[(gy * 2) * frame_w];
-        uint16_t *row1 = row0 + frame_w;
+        uint16_t *row0 = s_scaled_row2;
         uint8_t *bg_row = &bg_ids[gy * GB_PPU_SCREEN_W];
         const bool window_row = window_enabled && gy >= wy;
 
@@ -425,7 +699,10 @@ static void draw_dmg_background_scaled2(const gb_core_t *core, uint16_t *frame, 
                 palette);
         }
 
-        memcpy(row1, row0, GB_PPU_SCREEN_W * 2 * sizeof(uint16_t));
+        uint16_t *dst0 = &frame[(gy * 2) * frame_w];
+        uint16_t *dst1 = dst0 + frame_w;
+        memcpy(dst0, row0, GB_PPU_SCREEN_W * 2 * sizeof(uint16_t));
+        memcpy(dst1, row0, GB_PPU_SCREEN_W * 2 * sizeof(uint16_t));
     }
 }
 
@@ -470,19 +747,12 @@ static void draw_cgb_bg_segment_scaled3(
         const uint8_t lo = core->vram[bank][tile_addr & 0x1FFF];
         const uint8_t hi = core->vram[bank][(tile_addr + 1) & 0x1FFF];
         const uint16_t *pal = palette[attr & 0x07];
+        uint16_t expanded[24];
+        uint8_t ids[8];
 
-        for (int i = 0; i < run; i++) {
-            const uint8_t tile_x = (uint8_t)((tile_x_start + i) & 0x07);
-            const uint8_t bit = flip_x ? tile_x : (uint8_t)(7 - tile_x);
-            const uint8_t color_id = (uint8_t)(((hi >> bit) & 1) << 1 | ((lo >> bit) & 1));
-            const uint16_t color = pal[color_id & 0x03];
-            const int px = (gx + i) * 3;
-
-            bg_row[gx + i] = color_id;
-            row[px] = color;
-            row[px + 1] = color;
-            row[px + 2] = color;
-        }
+        expand_cgb_tile_row_scaled3(lo, hi, flip_x, pal, expanded, ids);
+        memcpy(&bg_row[gx], &ids[tile_x_start], (size_t)run);
+        memcpy(&row[gx * 3], &expanded[tile_x_start * 3], (size_t)run * 3 * sizeof(uint16_t));
 
         gx += run;
     }
@@ -529,18 +799,10 @@ static void draw_cgb_bg_segment_scaled2(
         const uint8_t lo = core->vram[bank][tile_addr & 0x1FFF];
         const uint8_t hi = core->vram[bank][(tile_addr + 1) & 0x1FFF];
         const uint16_t *pal = palette[attr & 0x07];
+        const gb_row2_cache_t *cached = get_scaled2_tile_row(lo, hi, flip_x, pal);
 
-        for (int i = 0; i < run; i++) {
-            const uint8_t tile_x = (uint8_t)((tile_x_start + i) & 0x07);
-            const uint8_t bit = flip_x ? tile_x : (uint8_t)(7 - tile_x);
-            const uint8_t color_id = (uint8_t)(((hi >> bit) & 1) << 1 | ((lo >> bit) & 1));
-            const uint16_t color = pal[color_id & 0x03];
-            const int px = (gx + i) * 2;
-
-            bg_row[gx + i] = color_id;
-            row[px] = color;
-            row[px + 1] = color;
-        }
+        memcpy(&bg_row[gx], &cached->ids[tile_x_start], (size_t)run);
+        memcpy(&row[gx * 2], &cached->pixels[tile_x_start * 2], (size_t)run * 2 * sizeof(uint16_t));
 
         gx += run;
     }
@@ -562,14 +824,15 @@ static void draw_cgb_background_scaled3(const gb_core_t *core, uint16_t *frame, 
         const int scaled_w = GB_PPU_SCREEN_W * 3;
         memset(bg_ids, 0, GB_PPU_SCREEN_W * GB_PPU_SCREEN_H);
         for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
-            uint16_t *row0 = &frame[(gy * 3) * frame_w];
-            uint16_t *row1 = row0 + frame_w;
-            uint16_t *row2 = row1 + frame_w;
             for (int px = 0; px < scaled_w; px++) {
-                row0[px] = color;
+                s_scaled_row3[px] = color;
             }
-            memcpy(row1, row0, (size_t)scaled_w * sizeof(uint16_t));
-            memcpy(row2, row0, (size_t)scaled_w * sizeof(uint16_t));
+            uint16_t *dst0 = &frame[(gy * 3) * frame_w];
+            uint16_t *dst1 = dst0 + frame_w;
+            uint16_t *dst2 = dst1 + frame_w;
+            memcpy(dst0, s_scaled_row3, (size_t)scaled_w * sizeof(uint16_t));
+            memcpy(dst1, s_scaled_row3, (size_t)scaled_w * sizeof(uint16_t));
+            memcpy(dst2, s_scaled_row3, (size_t)scaled_w * sizeof(uint16_t));
         }
         return;
     }
@@ -585,9 +848,7 @@ static void draw_cgb_background_scaled3(const gb_core_t *core, uint16_t *frame, 
         wy < GB_PPU_SCREEN_H;
 
     for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
-        uint16_t *row0 = &frame[(gy * 3) * frame_w];
-        uint16_t *row1 = row0 + frame_w;
-        uint16_t *row2 = row1 + frame_w;
+        uint16_t *row0 = s_scaled_row3;
         uint8_t *bg_row = &bg_ids[gy * GB_PPU_SCREEN_W];
         const bool window_row = window_enabled && gy >= wy;
 
@@ -638,8 +899,12 @@ static void draw_cgb_background_scaled3(const gb_core_t *core, uint16_t *frame, 
                 unsigned_tiles,
                 palette);
         }
-        memcpy(row1, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
-        memcpy(row2, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
+        uint16_t *dst0 = &frame[(gy * 3) * frame_w];
+        uint16_t *dst1 = dst0 + frame_w;
+        uint16_t *dst2 = dst1 + frame_w;
+        memcpy(dst0, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
+        memcpy(dst1, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
+        memcpy(dst2, row0, GB_PPU_SCREEN_W * 3 * sizeof(uint16_t));
     }
 }
 
@@ -659,12 +924,13 @@ static void draw_cgb_background_scaled2(const gb_core_t *core, uint16_t *frame, 
         const int scaled_w = GB_PPU_SCREEN_W * 2;
         memset(bg_ids, 0, GB_PPU_SCREEN_W * GB_PPU_SCREEN_H);
         for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
-            uint16_t *row0 = &frame[(gy * 2) * frame_w];
-            uint16_t *row1 = row0 + frame_w;
             for (int px = 0; px < scaled_w; px++) {
-                row0[px] = color;
+                s_scaled_row2[px] = color;
             }
-            memcpy(row1, row0, (size_t)scaled_w * sizeof(uint16_t));
+            uint16_t *dst0 = &frame[(gy * 2) * frame_w];
+            uint16_t *dst1 = dst0 + frame_w;
+            memcpy(dst0, s_scaled_row2, (size_t)scaled_w * sizeof(uint16_t));
+            memcpy(dst1, s_scaled_row2, (size_t)scaled_w * sizeof(uint16_t));
         }
         return;
     }
@@ -680,8 +946,7 @@ static void draw_cgb_background_scaled2(const gb_core_t *core, uint16_t *frame, 
         wy < GB_PPU_SCREEN_H;
 
     for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
-        uint16_t *row0 = &frame[(gy * 2) * frame_w];
-        uint16_t *row1 = row0 + frame_w;
+        uint16_t *row0 = s_scaled_row2;
         uint8_t *bg_row = &bg_ids[gy * GB_PPU_SCREEN_W];
         const bool window_row = window_enabled && gy >= wy;
 
@@ -733,7 +998,10 @@ static void draw_cgb_background_scaled2(const gb_core_t *core, uint16_t *frame, 
                 palette);
         }
 
-        memcpy(row1, row0, GB_PPU_SCREEN_W * 2 * sizeof(uint16_t));
+        uint16_t *dst0 = &frame[(gy * 2) * frame_w];
+        uint16_t *dst1 = dst0 + frame_w;
+        memcpy(dst0, row0, GB_PPU_SCREEN_W * 2 * sizeof(uint16_t));
+        memcpy(dst1, row0, GB_PPU_SCREEN_W * 2 * sizeof(uint16_t));
     }
 }
 
@@ -864,7 +1132,7 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
     const int frame_w = GB_PPU_SCREEN_W * scale;
     const int frame_h = GB_PPU_SCREEN_H * scale;
     const size_t pixel_count = (size_t)frame_w * frame_h;
-    static uint8_t bg_ids[GB_PPU_SCREEN_W * GB_PPU_SCREEN_H];
+    const gb_bg_signature_t bg_sig = make_bg_signature(core, x, y, scale);
 
     if ((scale == 2 || scale == 3) &&
         x >= 0 &&
@@ -878,27 +1146,59 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
         }
 
         uint16_t *frame = &canvas[y * BOARD_LCD_H_RES + x];
+        gb_fb_cache_t *cache = fb_cache_for(canvas);
+        gb_sprite_rect_t current_sprite_rects[GB_PPU_MAX_SPRITES];
+        const uint8_t current_sprite_rect_count = collect_sprite_rects(core, current_sprite_rects);
+        const bool can_reuse_bg =
+            cache != NULL &&
+            cache->bg_valid &&
+            bg_signature_equal(&cache->sig, &bg_sig) &&
+            s_bg_ids_valid &&
+            bg_signature_equal(&s_bg_ids_sig, &bg_sig);
+        perf.bg_cache_hit = can_reuse_bg ? 1 : 0;
+        perf.bg_miss_reason = can_reuse_bg ? GB_PPU_BG_MISS_NONE : bg_miss_reason(cache, &bg_sig);
+
         const int64_t bg_start_us = esp_timer_get_time();
-        if (scale == 3 && core->cgb_mode) {
-            draw_cgb_background_scaled3(core, frame, BOARD_LCD_H_RES, bg_ids);
-        } else if (scale == 3) {
-            draw_dmg_background_scaled3(core, frame, BOARD_LCD_H_RES, bg_ids);
-        } else if (core->cgb_mode) {
-            draw_cgb_background_scaled2(core, frame, BOARD_LCD_H_RES, bg_ids);
+        if (can_reuse_bg) {
+            restore_bg_rects(core, &bg_sig, frame, BOARD_LCD_H_RES, scale, cache->sprite_rects, cache->sprite_rect_count);
         } else {
-            draw_dmg_background_scaled2(core, frame, BOARD_LCD_H_RES, bg_ids);
+            if (scale == 3 && core->cgb_mode) {
+                draw_cgb_background_scaled3(core, frame, BOARD_LCD_H_RES, s_bg_ids);
+            } else if (scale == 3) {
+                draw_dmg_background_scaled3(core, frame, BOARD_LCD_H_RES, s_bg_ids);
+            } else if (core->cgb_mode) {
+                draw_cgb_background_scaled2(core, frame, BOARD_LCD_H_RES, s_bg_ids);
+            } else {
+                draw_dmg_background_scaled2(core, frame, BOARD_LCD_H_RES, s_bg_ids);
+            }
+            s_bg_ids_sig = bg_sig;
+            s_bg_ids_valid = true;
+            if (cache != NULL) {
+                cache->sig = bg_sig;
+                cache->bg_valid = true;
+            }
+        }
+        if (!can_reuse_bg && cache != NULL) {
+            cache->sig = bg_sig;
+            cache->bg_valid = true;
         }
         const int64_t obj_start_us = esp_timer_get_time();
         perf.bg_us = (uint32_t)(obj_start_us - bg_start_us);
-        draw_sprites(core, frame, BOARD_LCD_H_RES, scale, bg_ids);
+        draw_sprites(core, frame, BOARD_LCD_H_RES, scale, s_bg_ids);
         const int64_t misc_start_us = esp_timer_get_time();
         perf.obj_us = (uint32_t)(misc_start_us - obj_start_us);
 
-        const uint16_t border = board_rgb565(92, 108, 92);
-        board_fill_rect(x - 3, y - 3, frame_w + 6, 3, border);
-        board_fill_rect(x - 3, y + frame_h, frame_w + 6, 3, border);
-        board_fill_rect(x - 3, y, 3, frame_h, border);
-        board_fill_rect(x + frame_w, y, 3, frame_h, border);
+        if (!can_reuse_bg) {
+            const uint16_t border = board_rgb565(92, 108, 92);
+            board_fill_rect(x - 3, y - 3, frame_w + 6, 3, border);
+            board_fill_rect(x - 3, y + frame_h, frame_w + 6, 3, border);
+            board_fill_rect(x - 3, y, 3, frame_h, border);
+            board_fill_rect(x + frame_w, y, 3, frame_h, border);
+        }
+        if (cache != NULL) {
+            cache->sprite_rect_count = current_sprite_rect_count;
+            memcpy(cache->sprite_rects, current_sprite_rects, (size_t)current_sprite_rect_count * sizeof(current_sprite_rects[0]));
+        }
         board_mark_dirty_rect(x, y, frame_w, frame_h);
         const int64_t total_end_us = esp_timer_get_time();
         perf.misc_us = (uint32_t)(total_end_us - misc_start_us);
@@ -933,26 +1233,28 @@ void gb_ppu_draw_screen_scaled(const gb_core_t *core, int x, int y, int scale)
 
     const int64_t bg_start_us = esp_timer_get_time();
     if (core->cgb_mode && scale == 3) {
-        draw_cgb_background_scaled3(core, s_frame, frame_w, bg_ids);
+        draw_cgb_background_scaled3(core, s_frame, frame_w, s_bg_ids);
     } else if (!core->cgb_mode && scale == 3) {
-        draw_dmg_background_scaled3(core, s_frame, frame_w, bg_ids);
+        draw_dmg_background_scaled3(core, s_frame, frame_w, s_bg_ids);
     } else if (core->cgb_mode && scale == 2) {
-        draw_cgb_background_scaled2(core, s_frame, frame_w, bg_ids);
+        draw_cgb_background_scaled2(core, s_frame, frame_w, s_bg_ids);
     } else if (!core->cgb_mode && scale == 2) {
-        draw_dmg_background_scaled2(core, s_frame, frame_w, bg_ids);
+        draw_dmg_background_scaled2(core, s_frame, frame_w, s_bg_ids);
     } else {
         for (int gy = 0; gy < GB_PPU_SCREEN_H; gy++) {
             for (int gx = 0; gx < GB_PPU_SCREEN_W; gx++) {
                 const gb_pixel_t pixel = read_bg_or_window_pixel(core, (uint8_t)gx, (uint8_t)gy);
-                bg_ids[gy * GB_PPU_SCREEN_W + gx] = pixel.color_id;
+                s_bg_ids[gy * GB_PPU_SCREEN_W + gx] = pixel.color_id;
                 put_scaled_pixel(s_frame, frame_w, scale, gx, gy, pixel.color);
             }
         }
     }
+    s_bg_ids_sig = bg_sig;
+    s_bg_ids_valid = true;
     const int64_t obj_start_us = esp_timer_get_time();
     perf.bg_us = (uint32_t)(obj_start_us - bg_start_us);
 
-    draw_sprites(core, s_frame, frame_w, scale, bg_ids);
+    draw_sprites(core, s_frame, frame_w, scale, s_bg_ids);
     const int64_t misc_start_us = esp_timer_get_time();
     perf.obj_us = (uint32_t)(misc_start_us - obj_start_us);
 

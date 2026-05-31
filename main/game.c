@@ -34,7 +34,7 @@ static const char *TAG = "game";
 #define GB_STATS_H         230
 #define GB_PREVIEW_X       420
 #define GB_PREVIEW_Y       82
-#define GB_PLAY_DEFAULT_SCALE  3
+#define GB_PLAY_DEFAULT_SCALE  2
 #define GB_PLAY_MIN_SCALE      2
 #define GB_PLAY_MAX_SCALE      3
 #define GB_PLAY_MAX_FRAME_SKIP 1
@@ -108,6 +108,8 @@ typedef struct {
     uint32_t gb_perf_ppu_obj_us;
     uint32_t gb_perf_ppu_misc_us;
     uint32_t gb_perf_lcd_us;
+    uint8_t gb_perf_bg_cache_hit;
+    uint8_t gb_perf_bg_miss_reason;
     uint8_t gb_perf_redraw_frames;
     char rom_names[ROM_LIST_MAX][STORAGE_ROM_NAME_MAX];
     game_state_t collect;
@@ -656,6 +658,8 @@ static void reset_gb_perf(app_state_t *app)
     app->gb_perf_ppu_obj_us = 0;
     app->gb_perf_ppu_misc_us = 0;
     app->gb_perf_lcd_us = 0;
+    app->gb_perf_bg_cache_hit = 0;
+    app->gb_perf_bg_miss_reason = GB_PPU_BG_MISS_INIT;
     app->gb_perf_redraw_frames = GB_PLAY_UI_REDRAW_FRAMES;
 }
 
@@ -718,6 +722,20 @@ static void update_gb_perf(app_state_t *app, bool rendered)
     }
 }
 
+static char bg_miss_reason_char(uint8_t reason, uint8_t hit)
+{
+    if (hit) {
+        return 'H';
+    }
+    switch (reason) {
+    case GB_PPU_BG_MISS_SCROLL: return 'S';
+    case GB_PPU_BG_MISS_VRAM: return 'V';
+    case GB_PPU_BG_MISS_REG: return 'R';
+    case GB_PPU_BG_MISS_INIT: return 'I';
+    default: return '-';
+    }
+}
+
 static void draw_gb_play_perf(const app_state_t *app)
 {
     char line[24] = {0};
@@ -733,7 +751,12 @@ static void draw_gb_play_perf(const app_state_t *app)
     draw_text(34, 142, line, fg, 1);
     snprintf(line, sizeof(line), "PPU %uMS", (unsigned int)((app->gb_perf_ppu_us + 500) / 1000));
     draw_text(34, 158, line, fg, 1);
-    snprintf(line, sizeof(line), "BG %uMS", (unsigned int)((app->gb_perf_ppu_bg_us + 500) / 1000));
+    snprintf(
+        line,
+        sizeof(line),
+        "BG %uMS %c",
+        (unsigned int)((app->gb_perf_ppu_bg_us + 500) / 1000),
+        bg_miss_reason_char(app->gb_perf_bg_miss_reason, app->gb_perf_bg_cache_hit));
     draw_text(34, 174, line, fg, 1);
     snprintf(line, sizeof(line), "OBJ %uMS", (unsigned int)((app->gb_perf_ppu_obj_us + 500) / 1000));
     draw_text(34, 190, line, fg, 1);
@@ -913,6 +936,8 @@ static void draw_gb_play_screen(app_state_t *app)
     app->gb_perf_ppu_bg_us = ppu_perf.bg_us;
     app->gb_perf_ppu_obj_us = ppu_perf.obj_us;
     app->gb_perf_ppu_misc_us = ppu_perf.misc_us;
+    app->gb_perf_bg_cache_hit = ppu_perf.bg_cache_hit;
+    app->gb_perf_bg_miss_reason = ppu_perf.bg_miss_reason;
     if (!app->gb_play_static_drawn || app->gb_perf_redraw_frames > 0) {
         draw_gb_play_perf(app);
         if (app->gb_perf_redraw_frames > 0) {

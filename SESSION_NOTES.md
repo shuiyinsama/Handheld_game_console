@@ -1,130 +1,105 @@
 # Session Notes
 
-## Summary
+## Stage-End Summary
 
-This session brought the project from board/display bring-up to an early Game Boy ROM loader and emulator debug view.
-
-The current physical result:
-
-- LCD no longer flickers during auto-run after adopting a double-framebuffer approach.
-- ROM loads from TF card.
-- `GB PLAYER` screen shows CPU registers and PPU diagnostics.
-- Pressing `KEY0 AUTO` runs the core and eventually shows visible background tile patterns on the right preview area.
-- The latest observed screen showed `OP 76` / `HALTED` with visible tile-map output and nonzero `BG` values.
+This session brought the handheld project from board bring-up to a playable Game Boy prototype on real hardware. The project is now being paused at a natural checkpoint because the remaining performance work is running into the practical limits of ESP32-S3 plus the current 800x480 RGB LCD path.
 
 ## Hardware Confirmed
 
-- Board: ATK_DNESP32S3 V1.3.
-- Display: ALIENTEK 4.3 inch RGBLCD, used as 800x480 RGB panel.
-- The screen is connected through the 40-pin RGB ribbon. The yellow SPI header on the LCD is not needed for this RGB mode.
-- USB-C powers the board for current testing.
-- TF card / ROM loading works.
+- Board: ATK-DNESP32S3 V1.3, ESP32-S3 with 8 MB PSRAM.
+- Display: ALIENTEK 4.3-inch RGB LCD, treated as an 800x480 RGB panel.
+- Storage: TF card over SPI.
+- Input: BOOT plus KEY0 to KEY3 through the board input path.
+- Typical serial port during testing: COM6.
+- The LCD works through the RGB ribbon cable. The small yellow SPI-style header on the LCD module was not needed for the current RGB mode.
 
-## Important Fixes Already Made
+## Software Milestones
 
-1. LCD init was corrected for this panel and board:
-   - 800x480
-   - DE mode
-   - correct RGB GPIO order
-   - backlight through XL9555 IO1_3
+- Created and maintained an ESP-IDF/CMake firmware project.
+- Added local scripts and a desktop control panel workflow for build, flash, and monitor.
+- Brought up the RGB LCD and fixed early flicker by following the ALIENTEK-style framebuffer approach.
+- Added stable batched drawing through `board_begin_frame`, `board_end_frame`, and `board_present`.
+- Added TF card ROM scanning and ROM selection.
+- Added Game Boy ROM header parsing and loading into PSRAM.
+- Added a basic Game Boy emulator core with partial CPU, timer, interrupt, LCD, PPU, MBC, input, and save RAM behavior.
+- Added play/debug screens and on-screen performance counters.
+- Tested with `josplanet_demo_jam.gb` and Pokemon Yellow.
+- Confirmed save RAM persistence with Pokemon Yellow.
 
-2. LCD test patterns worked:
-   - first color cycling
-   - then stable UI
+## Current User-Facing State
 
-3. Button mapping was corrected:
-   - KEY3 up
-   - KEY1 down
-   - KEY2 left
-   - KEY0 right
+- The firmware can boot to a ROM/player interface.
+- ROM information can be shown.
+- Some GB ROMs can enter play mode and show recognizable graphics.
+- Input works.
+- Save RAM exists and has been tested.
+- 2X and 3X display modes were explored.
+- 2X is the practical default for performance.
 
-4. TF card support was added:
-   - FAT32
-   - `.gb` / `.gbc` ROM list in root
-   - header read and checksum display
+## Performance Notes
 
-5. GB core and ROM loading were added:
-   - basic MBC1/MBC3/MBC5 bank switching
-   - basic memory map
-   - early CPU opcode coverage
-   - timer and LCD line counters
+Game Boy resolution:
 
-6. PPU preview was added:
-   - reads LCDC, SCX, SCY, BGP, VRAM tile data and tile map
-   - draws 160x144 background preview scaled 2x
+- Native: 160x144.
+- 2X: 320x288.
+- 3X: 480x432.
 
-7. LCD flicker was fixed:
-   - direct tiny draw calls were replaced with back-buffer drawing
-   - RGB panel configured with two framebuffers
-   - full frame submitted through `board_present`
-   - rendering screens wrapped in `board_begin_frame` / `board_end_frame`
+Representative measurements reported by the user:
 
-8. CPU gaps fixed during testing:
-   - added `0x3B DEC SP`
-   - added `0xF2 LD A,(FF00+C)`
-   - improved `EI` to enable interrupts after a delay rather than immediately
+- 3X mode: around 26 to 33 FPS depending on scene.
+- 2X mode: around 37 FPS in some scenes.
+- 2X reported example: `FPS 37`, `RUN 2ms`, `DRAW 24ms`, `PPU 15ms`, `BG 13ms`, reason `S`.
 
-## Latest User Observation
+The current bottleneck is not mainly CPU execution. `RUN` has been reduced to a small part of the frame time. The heavier cost is in the PPU/background rendering and scaled framebuffer writes, especially while scrolling. Static scenes can benefit from caching, while scrolling scenes miss the cache and become expensive again.
 
-The user said:
+## Optimization Attempts
 
-```text
-halted
-```
+Useful or partially useful changes:
 
-The previous screenshot showed:
+- Stable full-frame RGB presentation instead of immediate small-rectangle LCD writes.
+- Back framebuffer drawing.
+- Performance timing split for `RUN`, `DRAW`, `PPU`, `BG`, `OBJ`, `OTH`, and `LCD`.
+- 2X scaling mode.
+- Background/tile caching experiments.
+- Reduced flicker by keeping LCD presentation stable and avoiding unsafe buffer updates.
 
-- `PC 4138 OP 76`
-- status `HALTED`
-- `STP 679936`
-- visible right-side tile pattern
-- `LCD 89 BG 16 352`
+Experiments that were not worth keeping or should be treated carefully:
 
-This is not automatically a failure. `OP 76` is the Game Boy `HALT` instruction. Games often execute HALT while waiting for VBlank/timer/input interrupts.
+- Aggressive scroll/source cache experiments caused little gain or flicker/layout instability.
+- Frame skipping improved responsiveness but sacrificed visual quality, so it was not treated as the preferred final direction.
+- Higher apparent FPS sometimes introduced sprite flicker until the timing/presentation path was made more conservative.
 
-The newest firmware now also displays:
+## Current Technical Conclusion
 
-```text
-IE xx IF xx IME x
-```
+The ESP32-S3 and this 800x480 RGB LCD can demonstrate a GB handheld prototype, but they are not an ideal platform for a polished full-speed Game Boy experience at comfortable 2X/3X scale. The project has succeeded as a hardware/software learning prototype and has exposed the main architecture constraint: video rendering and scaled framebuffer movement dominate the frame budget.
 
-Use that line to decide whether HALT is normal or whether interrupts are stuck.
+For a polished handheld, the next serious step should probably be stronger hardware rather than endless micro-optimizations on this board.
 
-## What To Check Next
+Recommended future hardware directions:
 
-Ask the user for a photo after flashing the latest build if needed. In the `GB PLAYER` screen, look at:
+- ESP32-P4-class board with stronger display acceleration potential.
+- High-end STM32H7 with external SDRAM and a display pipeline.
+- Linux-capable handheld SoC if the goal expands to stronger emulation or a richer UI.
 
-- Is `STP` still increasing?
-- Is `CY` still increasing?
-- Is `LY` still changing?
-- What are `IE`, `IF`, and `IME`?
-- Does status stay `HALTED` forever?
+GBA emulation should not be expected on this ESP32-S3 setup. It belongs in a different hardware tier.
 
-Interpretation:
+## If This Project Resumes
 
-- If `HALTED`, `IME 1`, and `IE & IF` has a pending bit, interrupt service may be wrong.
-- If `HALTED`, `IME 0`, and no enabled pending interrupts exist, it may be waiting for something else such as input/timer behavior.
-- If `STP/CY/LY` keep moving, it is not frozen in the simple sense.
-- If `BG` values are nonzero and preview has patterns, PPU background extraction is working at least partially.
+Good next steps on the current ESP32-S3 project:
 
-## Recommended Next Development Step
+1. Keep 2X mode as the default.
+2. Keep the UI/debug overlay lightweight.
+3. Avoid adding audio until video has real margin.
+4. Improve emulator correctness before chasing marginal FPS gains.
+5. Test changes on small ROMs and Pokemon Yellow.
+6. Keep following ALIENTEK examples for LCD changes.
 
-Stay aligned with examples and work incrementally:
+Good next steps for the broader handheld goal:
 
-1. Validate HALT interrupt wake-up behavior using on-screen `IE/IF/IME`.
-2. Add JOYP input register behavior so the ROM can see buttons.
-3. Improve PPU:
-   - render window layer
-   - render sprites/OAM
-   - support CGB palette/attributes later
-4. Reduce debug UI update rate once the emulator is stable enough, because full-frame debug redraw is useful now but not final-game behavior.
+1. Document this ESP32-S3 prototype as the learning board.
+2. Choose the next main chip based on display bandwidth, RAM, and emulator target.
+3. Treat GBA as a later architecture goal, not a continuation of this exact ESP32-S3 firmware.
 
-## Build Status
+## Git Notes
 
-The latest build completed successfully with:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\idf-build.ps1 build
-```
-
-No final commit was made during this pause.
+No final commit or push was requested during this stage-end documentation update. Ask the user before committing or pushing.
